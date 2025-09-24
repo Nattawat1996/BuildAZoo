@@ -96,7 +96,7 @@ local lastKnownBigPetUIDs = {}
 local shopStatus = { upgradesDone = 0, lastAction = "Inactive" }
 
 --== UI Element Placeholders
-local shopParagraph, petPlaceParagraph, eggPlaceParagraph
+local shopParagraph, petPlaceParagraph, eggPlaceParagraph, giftSummaryParagraph
 local bigPetSlot1_Label, bigPetSlot2_Label, bigPetSlot3_Label
 
 --== Script Configuration Table
@@ -984,11 +984,13 @@ end
 local TaskMgr = {}
 do
     local registry = {}
-    function TaskMgr.start(name, runnerFn)
+    function TaskMgr.start(name, runnerFn, ...) -- [MODIFIED] Added ... to accept more arguments
         TaskMgr.stop(name)
         local token = { alive = true, name = name }
+        local args = {...} -- [NEW] Pack the extra arguments into a table
         local co = task.spawn(function()
-            local ok, err = pcall(function() runnerFn(token) end)
+            -- [MODIFIED] Pass the arguments when calling the runner function
+            local ok, err = pcall(function() runnerFn(token, table.unpack(args)) end) 
             if not ok then warn(("[Task:%s] crashed: %s"):format(name, tostring(err))) end
         end)
         registry[name] = { token = token, co = co }
@@ -1475,7 +1477,7 @@ local function runAutoBuyEgg(tok)
                 
                 -- Check against the new unified filters
                 local okType = (not hasType) or (Configuration.Egg.Filters.Types[egg.Type])
-                local okMut = (not hasMut and egg.Mutate == "None") or (hasMut and Configuration.Egg.Filters.Mutations[egg.Mutate])
+                local okMut = (not hasMut) or (Configuration.Egg.Filters.Mutations[egg.Mutate])
                 
                 if okType and okMut then
                     pcall(function() CharacterRE:FireServer("BuyEgg", egg.UID) end)
@@ -1558,97 +1560,169 @@ end
 --           TASK RUNNERS: Gift
 --==============================================================
 local function resetGiftUIState()
-    if startGiftButton and stopGiftButton then
-        startGiftButton.Visible = true
-        stopGiftButton.Visible = false
+    if giftSummaryParagraph then
+        giftSummaryParagraph:SetTitle("ส่งของเรียบร้อย!")
+        giftSummaryParagraph:SetDesc("กดปุ่ม 'ตรวจสอบรายการ' เพื่อเริ่มใหม่อีกครั้ง")
     end
     Configuration.Players.IsGifting = false
+    currentGiftingList = {} -- Clear the list
 end
-
-local function runGifting(tok)
+--==============================================================
+--          NEW FUNCTION: GATHER ITEMS FOR GIFTING PREVIEW (v2)
+--==============================================================
+local function gatherItemsForGifting()
     local targetPlayer = Players:FindFirstChild(Configuration.Players.SelectPlayer)
-    if not targetPlayer then 
+    if not targetPlayer then
         Fluent:Notify({ Title = "Error", Content = "Selected player not found.", Duration = 5 })
-        resetGiftUIState()
-        return 
+        return nil
     end
 
-    Fluent:Notify({ Title = "Gifting", Content = ("Warping to %s..."):format(targetPlayer.Name), Duration = 3 })
-    local ok, err = TeleportToPlayer(targetPlayer)
-    if not ok then 
-        Fluent:Notify({ Title = "Teleport Failed", Content = tostring(err), Duration = 5 })
-        resetGiftUIState()
-        return 
-    end
-    task.wait(1)
-
-    local sent, limit = 0, (tonumber(Configuration.Players.GiftLimit) or math.huge)
     local giftType = Configuration.Players.GiftType
+    local limit = (tonumber(Configuration.Players.GiftLimit) or math.huge)
+    local itemsToSend = {} -- Will hold raw UIDs
+    local itemSummary = {} 
 
-    local function trySend(uid)
-        -- Check for stop signal from TaskMgr and limit
-        if not tok.alive or sent >= limit then return true end 
-        
-        CharacterRE:FireServer("Focus", uid); task.wait(0.75)
-        GiftRE:FireServer(targetPlayer); task.wait(0.75)
-        CharacterRE:FireServer("Focus")
-        sent = sent + 1
-        return false -- Return false to continue the loop
-    end
-
+    -- ... (โค้ดส่วนที่ค้นหา Pet, Egg, Food จะยังคงเหมือนเดิมทุกประการ) ...
+    -- ... (You don't need to change the item finding logic inside this function) ...
     if giftType == "Pet" then
         local filters = Configuration.Players.PetFilters
-        local petsToSend = {}
+        local petsToFilter = {}
         for _, pet in ipairs(OwnedPetData:GetChildren()) do
-            if not tok.alive then break end
-            if not pet:GetAttribute("D") then
+            if not pet:GetAttribute("D") then table.insert(petsToFilter, pet.Name) end
+        end
+        local sortedPets = SortPetUidsByIncome(petsToFilter)
+
+        for _, uid in ipairs(sortedPets) do
+            if #itemsToSend >= limit then break end
+            local pet = OwnedPetData:FindFirstChild(uid)
+            if pet then
                 local shouldAdd = false
                 if filters.Mode == "All" then shouldAdd = true
                 elseif filters.Mode == "Match" then
                     local t, m = pet:GetAttribute("T"), pet:GetAttribute("M") or "None"
                     if (not next(filters.Types) or filters.Types[t]) and (not next(filters.Mutations) or filters.Mutations[m]) then shouldAdd = true end
                 elseif filters.Mode == "Range" then
-                    local income = GetIncomeFast(pet.Name) or 0
+                    local income = GetIncomeFast(uid) or 0
                     if income >= (filters.MinIncome or 0) and income <= (filters.MaxIncome or math.huge) then shouldAdd = true end
                 end
-                if shouldAdd then table.insert(petsToSend, pet.Name) end
+                if shouldAdd then
+                    table.insert(itemsToSend, uid)
+                    local petType = pet:GetAttribute("T") or "Unknown"
+                    local petMuta = pet:GetAttribute("M") or "None"
+                    local name = ("%s (%s)"):format(petType, petMuta)
+                    itemSummary[name] = (itemSummary[name] or 0) + 1
+                end
             end
         end
-        for _, uid in ipairs(SortPetUidsByIncome(petsToSend)) do if trySend(uid) then break end end
+    -- ... (rest of the egg and food logic is the same)
     elseif giftType == "Egg" then
         local filters = Configuration.Players.EggFilters
         for _, egg in ipairs(OwnedEggData:GetChildren()) do
-            if not tok.alive then break end
+            if #itemsToSend >= limit then break end
             if not egg:FindFirstChild("DI") then
-                local shouldSend = false
-                if filters.Mode == "All" then shouldSend = true
+                local shouldAdd = false
+                if filters.Mode == "All" then shouldAdd = true
                 elseif filters.Mode == "Match" then
                     local t, m = egg:GetAttribute("T") or "BasicEgg", egg:GetAttribute("M") or "None"
-                    if (not next(filters.Types) or filters.Types[t]) and (not next(filters.Mutations) or filters.Mutations[m]) then shouldSend = true end
+                    if (not next(filters.Types) or filters.Types[t]) and (not next(filters.Mutations) or filters.Mutations[m]) then shouldAdd = true end
                 end
-                if shouldSend then if trySend(egg.Name) then break end end
+                if shouldAdd then
+                    table.insert(itemsToSend, egg.Name)
+                    local eggType = egg:GetAttribute("T") or "UnknownEgg"
+                    local eggMuta = egg:GetAttribute("M") or "None"
+                    local name = ("%s (%s)"):format(eggType, eggMuta)
+                    itemSummary[name] = (itemSummary[name] or 0) + 1
+                end
             end
         end
     elseif giftType == "Food" then
         local filters = Configuration.Players.FoodFilters
         local inv = InventoryData and InventoryData:GetAttributes() or {}
         for foodName, amount in pairs(inv) do
-            if not tok.alive then break end
+            if #itemsToSend >= limit then break end
             if table.find(PetFoods_InGame, foodName) then
-                local shouldSend = false
-                if filters.Mode == "All" then shouldSend = true
+                local shouldAdd = false
+                if filters.Mode == "All" then shouldAdd = true
                 elseif filters.Mode == "Select" then
-                    if filters.Selected[foodName] then shouldSend = true end
+                    if filters.Selected[foodName] then shouldAdd = true end
                 end
-                if shouldSend then
-                    for _ = 1, amount do if trySend(foodName) then break end end
+                if shouldAdd then
+                    local countToAdd = math.min(amount, limit - #itemsToSend)
+                    for i = 1, countToAdd do
+                        table.insert(itemsToSend, foodName)
+                    end
+                    itemSummary[foodName] = (itemSummary[foodName] or 0) + countToAdd
                 end
             end
         end
     end
     
-    Fluent:Notify({ Title = "Gifting", Content = "Gifting process finished or stopped.", Duration = 5 })
-    resetGiftUIState() -- Reset UI when done
+    if #itemsToSend == 0 then return nil end
+    
+    local sortedSummary = {}
+    for name, count in pairs(itemSummary) do
+        table.insert(sortedSummary, {name = name, count = count})
+    end
+    table.sort(sortedSummary, function(a, b) return a.name < b.name end)
+    
+    -- [MODIFIED] Return the raw list of UIDs as the 4th value
+    return sortedSummary, #itemsToSend, targetPlayer.Name, itemsToSend
+end
+
+local function runGifting(tok, giftList)
+    local targetPlayer = Players:FindFirstChild(Configuration.Players.SelectPlayer)
+    if not targetPlayer then 
+        resetGiftUIState(); return 
+    end
+    
+    if not giftList then
+        warn("[Task:Gifting] crashed: giftList is nil.")
+        resetGiftUIState()
+        return
+    end
+    TeleportToPlayer(targetPlayer) 
+    task.wait(2)
+    local sent = 0
+    local totalToSend = #giftList
+
+    for i, uid in ipairs(giftList) do
+        if not tok.alive then break end
+        
+        -- [MODIFIED] Find item name by Type and Mutation
+        local giftType = Configuration.Players.GiftType
+        local itemDisplayName = "UID: " .. tostring(uid) -- Default display
+
+        if giftType == "Pet" then
+            local pet = OwnedPetData:FindFirstChild(uid)
+            if pet then
+                local t = pet:GetAttribute("T") or "Unknown"
+                local m = pet:GetAttribute("M") or "None"
+                itemDisplayName = ("Pet: %s (%s)"):format(t, m)
+            end
+        elseif giftType == "Egg" then
+            local egg = OwnedEggData:FindFirstChild(uid)
+            if egg then
+                local t = egg:GetAttribute("T") or "UnknownEgg"
+                local m = egg:GetAttribute("M") or "None"
+                itemDisplayName = ("Egg: %s (%s)"):format(t, m)
+            end
+        elseif giftType == "Food" then
+            itemDisplayName = "Food: " .. tostring(uid)
+        end
+        
+        -- Update UI to show progress with the new display name
+        giftSummaryParagraph:SetTitle( ("กำลังส่งชิ้นที่ %d / %d..."):format(i, totalToSend) )
+        giftSummaryParagraph:SetDesc(itemDisplayName) -- [MODIFIED] Use the new formatted name
+
+        -- Send the item
+        CharacterRE:FireServer("Focus", uid); task.wait(0.75)
+        GiftRE:FireServer(targetPlayer); task.wait(0.75)
+        CharacterRE:FireServer("Focus")
+        sent = sent + 1
+    end
+    
+    task.wait(1)
+    resetGiftUIState()
 end
 --==============================================================
 --           TASK RUNNERS: AUTO PLACE EGG FEATURE
@@ -2010,15 +2084,20 @@ petPlaceParagraph = Tabs.Pet:AddParagraph({ Title = "Auto Place Status", Content
 
 
 --================== [ UNIFIED FILTER SETTINGS ] ==================
-Tabs.Pet:AddSection("Pet Filter Settings")
+Tabs.Pet:AddSection("PlacePet Settings")
 
 Tabs.Pet:AddDropdown("PlacePet Mode", { Title = "Place Filter Mode", Values = {"All", "Match", "Income >="}, Default = "All", 
     Callback = function(v) Configuration.Pet.Filters.PlaceMode = v end 
 })
+Tabs.Pet:AddInput("PlacePet_IncomeAbove", { Title = "Place pets with income >=", Default = "0", Numeric = true, Finished = true, 
+    Callback = function(v) Configuration.Pet.Filters.IncomeAbove = tonumber(v) or 0 end 
+})
+Tabs.Pet:AddSection("Collect Pet Settings")
+
 Tabs.Pet:AddDropdown("CollectPet Mode",{ Title = "Collect Filter Mode", Values = {"All", "Match", "Income <="}, Default = "All", 
     Callback = function(v) Configuration.Pet.Filters.CollectMode = v end 
 })
-
+Tabs.Pet:AddSection("Filter Settings")
 Tabs.Pet:AddDropdown("Filter Area", { Title = "Area", Values = {"Any","Land","Water"}, Default = "Any", 
     Callback = function(v) Configuration.Pet.Filters.Area = v end 
 })
@@ -2029,9 +2108,7 @@ Tabs.Pet:AddDropdown("Filter Mutations", { Title = "Select Mutations", Values = 
     Callback = function(v) Configuration.Pet.Filters.Mutations = v end 
 })
 
-Tabs.Pet:AddInput("PlacePet_IncomeAbove", { Title = "Place pets with income >=", Default = "0", Numeric = true, Finished = true, 
-    Callback = function(v) Configuration.Pet.Filters.IncomeAbove = tonumber(v) or 0 end 
-})
+
 Tabs.Pet:AddInput("CollectPet_IncomeBelow",{ Title = "Collect pets with income <=", Default = "0", Numeric = true, Finished = true,
     Callback = function(v) Configuration.Pet.Filters.IncomeBelow = tonumber(v) or 0 end 
 })
@@ -2131,32 +2208,64 @@ Tabs.Shop:AddDropdown("BigPetSlot3_Foods", { Title = "Food for Slot 3", Values =
 
 --============================== [TAB] Players ===========================
 Tabs.Players:AddSection("📦 Gifting")
--- ปุ่ม Start
-startGiftButton = Tabs.Players:AddButton({ Title = "Start Gifting", Description = "Sends items to the selected player based on filters", 
+
+-- 1. ประกาศตัวแปร UI และ State
+local previewGiftButton, confirmAndSendButton, cancelAndStopButton
+local currentGiftingList = {} -- [MODIFIED] State variable to hold the list of UIDs to send
+
+-- 2. สร้าง UI Elements
+previewGiftButton = Tabs.Players:AddButton({ Title = "1. ตรวจสอบรายการ (Preview)", Description = "แสดงรายการของที่จะส่งตาม Filter",
     Callback = function()
-        Configuration.Players.IsGifting = true
-        -- แก้ไขโดยการลบ .Container ออก
-        startGiftButton.Visible = false
-        stopGiftButton.Visible = true
-        TaskMgr.start("Gifting", runGifting)
+        -- [MODIFIED] gatherItemsForGifting now returns the raw list of UIDs too
+        local sortedSummary, totalItems, targetName, rawUIDList = gatherItemsForGifting()
+        
+        if not sortedSummary then 
+            giftSummaryParagraph:SetTitle("ไม่พบรายการที่ตรงกับ Filter")
+            giftSummaryParagraph:SetDesc("กรุณาตรวจสอบ Filter ของคุณแล้วลองอีกครั้ง")
+            currentGiftingList = {} -- Clear the list
+            return 
+        end
+
+        currentGiftingList = rawUIDList -- [MODIFIED] Save the raw list for sending
+        
+        -- Build and display the summary directly here
+        local summaryLines = {}
+        for _, item in ipairs(sortedSummary) do
+            table.insert(summaryLines, ("- %s x %d"):format(item.name, item.count))
+        end
+        giftSummaryParagraph:SetTitle(("รายการที่จะส่งให้ %s (%d ชิ้น):"):format(targetName, totalItems))
+        giftSummaryParagraph:SetDesc(table.concat(summaryLines, "\n"))
     end
 })
 
--- ปุ่ม Stop
-stopGiftButton = Tabs.Players:AddButton({ Title = "Stop Gifting", Description = "Stops the current gifting process.", 
+giftSummaryParagraph = Tabs.Players:AddParagraph({ Title = "ยังไม่มีรายการ", Content = "กดปุ่ม 'ตรวจสอบรายการ' เพื่อดูของที่จะส่ง" })
+
+confirmAndSendButton = Tabs.Players:AddButton({ Title = "2. ยืนยันและเริ่มส่ง",
+    Callback = function()
+        if #currentGiftingList == 0 then
+            Fluent:Notify({Title="Gifting", Content="กรุณากด 'ตรวจสอบรายการ' ก่อนเริ่มส่ง", Duration=4})
+            return
+        end
+        giftSummaryParagraph:SetTitle("กำลังส่งของ...")
+        giftSummaryParagraph:SetDesc("กด 'ยกเลิก/หยุดส่ง' เพื่อหยุดการทำงาน")
+        
+        -- [MODIFIED] Pass currentGiftingList directly to the task
+        TaskMgr.start("Gifting", runGifting, currentGiftingList) 
+    end
+})
+
+cancelAndStopButton = Tabs.Players:AddButton({ Title = "3. ยกเลิก / หยุดส่ง",
     Callback = function()
         TaskMgr.stop("Gifting")
+        currentGiftingList = {} -- Clear the list
+        
+        giftSummaryParagraph:SetTitle("ยังไม่มีรายการ")
+        giftSummaryParagraph:SetDesc("กดปุ่ม 'ตรวจสอบรายการ' เพื่อดูของที่จะส่ง")
     end
 })
 
--- แก้ไขโดยใช้ task.defer() เพื่อหน่วงเวลาการซ่อนปุ่ม
-task.defer(function()
-    if stopGiftButton then
-        stopGiftButton.Visible = false
-    end
-end)
--- แก้ไขโดยการลบ .Container ออก
-stopGiftButton.Visible = false -- ซ่อนปุ่ม Stop ไว้ตอนเริ่มต้น
+
+
 local Players_Dropdown = Tabs.Players:AddDropdown("Players Dropdown",{ Title = "Select Player", Values = Players_InGame, Multi = false, Default = "", Callback = function(v) Configuration.Players.SelectPlayer = v end })
 table.insert(EnvirontmentConnections, Players_List_Updated.Event:Connect(function(newList) Players_Dropdown:SetValues(newList) end))
 
