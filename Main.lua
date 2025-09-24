@@ -1756,6 +1756,20 @@ local function runAutoUnlockTiles(tok)
 end
 
 -- ========================================================================================
+local function runEnforceFPSLock(tok)
+    while tok.alive do
+        if Configuration.Perf.FPSLock then
+            ApplyFPSLock()
+        else
+            -- ถ้าผู้ใช้ปิดการล็อกระหว่างที่ Task นี้ทำงาน ให้หยุด Task
+            TaskMgr.stop("EnforceFPSLock")
+            break
+        end
+        -- รอ 3 วินาทีก่อนจะเช็คและสั่งล็อกซ้ำอีกครั้ง
+        if not _waitAlive(tok, 3) then break end
+    end
+end
+
 local function runAntiAFK(tok)
     local VirtualUser = game:GetService("VirtualUser")
     while tok.alive do
@@ -2219,7 +2233,15 @@ Tabs.Main:AddSlider("AutoCollect Delay",{ Title = "Collect Delay", Default = 3, 
 --===================== Performance =====================
 Tabs.Main:AddSection("Performance")
 Tabs.Main:AddToggle("FPS_Lock", { Title = "Lock FPS", Default = false, Callback = function(v)
-    Configuration.Perf.FPSLock = v; ApplyFPSLock()
+    Configuration.Perf.FPSLock = v
+    ApplyFPSLock() -- สั่งล็อก/ปลดล็อกทันทีที่กด
+    if v then
+        -- ถ้าเปิดใช้งาน ให้เริ่ม Task ที่คอยล็อกซ้ำๆ
+        TaskMgr.start("EnforceFPSLock", runEnforceFPSLock)
+    else
+        -- ถ้าปิดใช้งาน ให้หยุด Task ที่คอยล็อกซ้ำๆ
+        TaskMgr.stop("EnforceFPSLock")
+    end
 end })
 Tabs.Main:AddInput("FPS_Value", { Title = "FPS Cap", Default = tostring(Configuration.Perf.FPSValue), Numeric = true, Finished = true, Callback = function(v)
     Configuration.Perf.FPSValue = tonumber(v) or 60; if Configuration.Perf.FPSLock then ApplyFPSLock() end
@@ -3133,22 +3155,29 @@ end)
 -----------------------------------------------------------------
 
 Window:SelectTab(Home)
-Fluent:Notify({ Title = "Fluent", Content = "The script has been loaded.", Duration = 8 })
-Perf_Set3DEnabled(not (Configuration.Perf.Disable3D == true))
-
-SaveManager:LoadAutoloadConfig()
-updateBigPetSlots()
+Fluent:Notify({ Title = "Fluent", Content = "Script Loaded! Initializing background tasks...", Duration = 4 })
 getgenv().MeowyBuildAZoo = Window
+
+-- ห่อหุ้มการทำงานหลังสร้าง UI ทั้งหมดไว้ใน task.spawn
+-- เพื่อให้ UI แสดงผลทันทีโดยไม่รอโหลดค่าหรือเริ่ม Task
+task.spawn(function()
+    -- รอสักครู่เพื่อให้เกมและ UI ตั้งตัว
+    task.wait(3) -- หน่วงเวลา 3 วินาที
+
+    Fluent:Notify({ Title = "System", Content = "Loading saved settings...", Duration = 3 })
+    SaveManager:LoadAutoloadConfig()
+    updateBigPetSlots()
+    
+    Fluent:Notify({ Title = "System", Content = "Applying performance settings & starting tasks...", Duration = 3 })
+end)
+
 
 --==============================================================
 --              EVENT CONNECTIONS (MOVED TO END)
 --==============================================================
 table.insert(EnvirontmentConnections, Pet_Folder.ChildAdded:Connect(function(pet)
     task.defer(function()
-        -- 1. ตรวจสอบก่อนว่าเป็นสัตว์เลี้ยงของเราหรือไม่ ถ้าไม่ใช่ ให้หยุดทันที
         if not _isOwnedPetModel(pet) then return end
-        
-        -- ถ้าใช่ ถึงจะทำงานส่วนที่เหลือ
         _addMyPet(pet)
         _buildOwnedPetEntry(pet, tostring(pet))
         handlePossibleBigPetChange_OnAdd(pet) 
@@ -3157,16 +3186,10 @@ end))
 
 table.insert(EnvirontmentConnections, Pet_Folder.ChildRemoved:Connect(function(pet)
     task.defer(function()
-        -- 1. ตรวจสอบว่าใช่สัตว์เลี้ยงที่เราเคยบันทึกไว้หรือไม่ ถ้าไม่ใช่ ให้หยุดทันที
-        -- (วิธีนี้ปลอดภัยที่สุดสำหรับตอนลบ เพราะ pet อาจถูกทำลายไปบางส่วน)
         if not MyPets[pet] then return end
-
-        -- ถ้าใช่ ถึงจะทำงานส่วนที่เหลือ
         local petUID = tostring(pet)
         local wasBigPet = MyBigPets[petUID] ~= nil 
-        
         _removeMyPet(pet)
-        
         if wasBigPet then
             onBigPetListChanged()
         end
@@ -3179,7 +3202,10 @@ end))
 --==============================================================
 local function _autostart()
     -- Apply Performance Settings First
-    if Configuration.Perf.FPSLock then ApplyFPSLock() end
+    if Configuration.Perf.FPSLock then
+        ApplyFPSLock()
+        TaskMgr.start("EnforceFPSLock", runEnforceFPSLock)
+    end
     if Configuration.Perf.HidePets then ApplyHidePets(true) end
     if Configuration.Perf.HideEggs then ApplyHideEggs(true) end
     if Configuration.Perf.HideEffects then ApplyHideEffects(true) end
@@ -3216,5 +3242,4 @@ Window.Root.Destroying:Once(function()
     end
     Perf_Set3DEnabled(true)
 end)
-
 
