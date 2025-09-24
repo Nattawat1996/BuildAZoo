@@ -1,10 +1,3 @@
---[[
-    Script: Build A Zoo (V2.1 Smartpet)
-    Game: Build A Zoo (PlaceId 105555311806207)
-    Author: DemiGodz
-    Description: Script for automating various tasks within the game.
---]]
-
 --==============================================================
 --                      INITIALIZATION
 --==============================================================
@@ -451,6 +444,7 @@ local function feedFruitToPet(fruitName, petUID)
         return false
     end
 end
+
 --==============================================================
 --                 GRID & PLOT MANAGEMENT
 --==============================================================
@@ -1183,25 +1177,28 @@ local function pickFoodPerPet(slotNumber, invAttrs)
 end
 
 local function runAutoFeed(tok)
+    local Data_OwnedPets = Data:WaitForChild("Pets",30)
     while tok.alive do
-        local invAttrs = (InventoryData and InventoryData:GetAttributes()) or {}
-        for uid, petData in pairs(MyBigPets) do
+        if not InventoryData then InventoryData = Data:FindFirstChild("Asset") end
+        local Data_Inventory = (InventoryData and InventoryData:GetAttributes()) or {}
+        for uid, petModel in pairs(MyBigPets) do
             if not tok.alive then break end
+
             local slot = bigPetSlotMap[uid]
             if slot then
-                local petCfg = OwnedPetData:FindFirstChild(uid)
+                local petCfg = Data_OwnedPets:FindFirstChild(uid)
                 if petCfg and (not petCfg:GetAttribute("Feed")) then
-                    local foodToFeed = pickFoodPerPet(slot, invAttrs)
-                    if foodToFeed then
-                        if feedFruitToPet(foodToFeed, uid) then
-                            invAttrs[foodToFeed] = math.max(0, (tonumber(invAttrs[foodToFeed] or 0) or 0) - 1)
-                        end
+                    local Food = pickFoodPerPet(slot, Data_Inventory)
+                    if Food and Food ~= "" then
+                        CharacterRE:FireServer("Focus", Food) task.wait(0.3)
+                        PetRE:FireServer("Feed", uid) task.wait(0.3)
+                        CharacterRE:FireServer("Focus")
+                        Data_Inventory[Food] = math.max(0, (tonumber(Data_Inventory[Food] or 0) or 0) - 1)
                     end
                 end
             end
         end
-        local delay = tonumber(Configuration.Pet.AutoFeed_Delay) or 10
-        if not _waitAlive(tok, delay) then break end
+        if not _waitAlive(tok, tonumber(Configuration.Pet.AutoFeed_Delay) or 10) then break end
     end
 end
 
@@ -1219,8 +1216,10 @@ local SmartFeedConfig = {
 }
 
 local function isMutationUnlocked(mutationName)
-    local screenGui = Player.PlayerGui:FindFirstChild("ScreenBigPetSwitch", 5)
-    local mutsFrame = screenGui and screenGui:FindFirstChild("Root/Muts", 5)
+    local playerGui = Player:WaitForChild("PlayerGui", 5)
+    local screenGui = playerGui and playerGui:WaitForChild("ScreenBigPetSwitch", 5)
+    local rootFrame = screenGui and screenGui:WaitForChild("Root", 5)
+    local mutsFrame = rootFrame and rootFrame:WaitForChild("Muts", 5)
     if not mutsFrame then return false end
     local mutationFrame = mutsFrame:FindFirstChild(mutationName)
     local lockFrame = mutationFrame and mutationFrame:FindFirstChild("lock")
@@ -1228,8 +1227,11 @@ local function isMutationUnlocked(mutationName)
 end
 
 local function isBigPetUnlocked(petName)
-    local screenGui = Player.PlayerGui:FindFirstChild("ScreenBigPetSwitch", 5)
-    local scrollingFrame = screenGui and screenGui:FindFirstChild("Root/Frame/ScrollingFrame", 5)
+    local playerGui = Player:WaitForChild("PlayerGui", 5)
+    local screenGui = playerGui and playerGui:WaitForChild("ScreenBigPetSwitch", 5)
+    local rootFrame = screenGui and screenGui:WaitForChild("Root", 5)
+    local mainFrame = rootFrame and rootFrame:WaitForChild("Frame", 5)
+    local scrollingFrame = mainFrame and mainFrame:WaitForChild("ScrollingFrame", 5)
     if not scrollingFrame then return false end
     local BLACK_COLOR = Color3.new(0, 0, 0)
     for _, petInstance in ipairs(scrollingFrame:GetChildren()) do
@@ -1286,40 +1288,58 @@ function openBigPetUIForSlot(slotNumber)
 end
 
 --== SmartFeed Runner
+-- ================== runSmartFeed  ==================
+
 local function runSmartFeed(tok)
+    local Data_OwnedPets = Data:WaitForChild("Pets", 30)
+
     while tok.alive do
-        dprint("[SmartFeed] Starting new check cycle...")
+        dprint("[SmartFeed] เริ่มรอบการตรวจสอบใหม่...")
+
+        -- ดึงข้อมูลที่จำเป็นในแต่ละรอบ
         local invAttrs = (InventoryData and InventoryData:GetAttributes()) or {}
         local currentPetSlots = {}
-        for uid, slot in pairs(bigPetSlotMap) do currentPetSlots[slot] = uid end
+        for uid, slot in pairs(bigPetSlotMap) do
+            currentPetSlots[slot] = uid
+        end
         
         local actionTakenThisCycle = false
 
+        -- วนลูปตามลำดับความสำคัญ Slot 1 -> 2 -> 3
         for slotNumber = 1, 3 do
+            -- ถ้ามีการป้อนอาหารไปแล้ว หรือปิดฟังก์ชัน ให้หยุดทันที
             if not tok.alive or actionTakenThisCycle then break end
             
             local petUID = currentPetSlots[slotNumber]
-            if not petUID then dprint(("[SmartFeed] Slot %d is empty, skipping."):format(slotNumber)); continue end
+            if not petUID then
+                dprint(("[SmartFeed] Slot %d ไม่มี Pet, ข้าม..."):format(slotNumber))
+                continue
+            end
 
-            local petCfg = OwnedPetData:FindFirstChild(petUID)
+            local petCfg = Data_OwnedPets:FindFirstChild(petUID)
             if not petCfg or petCfg:GetAttribute("Feed") then
-                dprint(("[SmartFeed] Pet in Slot %d (%s) is on cooldown, skipping."):format(slotNumber, petUID))
+                dprint(("[SmartFeed] Pet ใน Slot %d (%s) ติด Cooldown, ข้าม..."):format(slotNumber, petUID))
                 continue
             end
             
+            -- เปิด UI และเพิ่มเวลารอเป็น 2.5 วินาที เผื่อ UI โหลดช้า
             if not openBigPetUIForSlot(slotNumber) then
-                warn(("[SmartFeed] Failed to open UI for Slot %d, skipping."):format(slotNumber))
+                warn(("[SmartFeed] ไม่สามารถเปิด UI ของ Slot %d ได้, ข้าม..."):format(slotNumber))
                 continue
             end
-            task.wait(2.5) -- Wait for UI to load
+            task.wait(2.5)
 
-            -- Priority 1: Unlock new Pets
+            -- [ลำดับที่ 1] ตรวจสอบเพื่อ "ปลดล็อก Pet" (โค้ดส่วนนี้ยังเหมือนเดิม)
+            dprint(("[SmartFeed] กำลังตรวจสอบ 'Pet Unlock' สำหรับ Slot %d"):format(slotNumber))
             for _, config in ipairs(SmartFeedConfig) do
                 if config.UnlockType == "PET" and table.find(config.Slots, slotNumber) and (invAttrs[config.Fruit] or 0) > 0 then
-                    for _, petName in ipairs(config.UnlockTarget) do
+                    local targets = (type(config.UnlockTarget) == "table") and config.UnlockTarget or {config.UnlockTarget}
+                    for _, petName in ipairs(targets) do
                         if not isBigPetUnlocked(petName) then
-                            dprint(("[SmartFeed] PET TARGET! Feeding '%s' in Slot %d to unlock '%s'"):format(config.Fruit, slotNumber, petName))
-                            if feedFruitToPet(config.Fruit, petUID) then actionTakenThisCycle = true end
+                            dprint(("[SmartFeed] พบเป้าหมาย PET! ป้อน '%s' ให้ Pet ใน Slot %d เพื่อปลดล็อก '%s'"):format(config.Fruit, slotNumber, petName))
+                            if feedFruitToPet(config.Fruit, petUID) then
+                                actionTakenThisCycle = true
+                            end
                             break
                         end
                     end
@@ -1327,72 +1347,39 @@ local function runSmartFeed(tok)
                 if actionTakenThisCycle then break end
             end
 
-            -- Priority 2: Unlock new Mutations
+            -- [ลำดับที่ 2] ตรวจสอบเพื่อ "ปลดล็อก Mutation" (พร้อม Log แบบละเอียด)
             if not actionTakenThisCycle then
+                dprint(("[SmartFeed] กำลังตรวจสอบ 'Mutation Unlock' สำหรับ Slot %d"):format(slotNumber))
                 for _, config in ipairs(SmartFeedConfig) do
                     if config.UnlockType == "MUTATION" then
-                        if (invAttrs[config.Fruit] or 0) > 0 and not isMutationUnlocked(config.UnlockTarget) then
-                             dprint(("[SmartFeed] MUTA TARGET! Feeding '%s' in Slot %d to unlock '%s'"):format(config.Fruit, slotNumber, config.UnlockTarget))
-                            if feedFruitToPet(config.Fruit, petUID) then actionTakenThisCycle = true; break end
+                        local target = config.UnlockTarget
+                        local fruit = config.Fruit
+                        local hasFruit = (invAttrs[fruit] or 0) > 0
+                        local isUnlocked = isMutationUnlocked(target)
+                        
+                        -- พิมพ์ผลการตรวจสอบทั้งหมดออกมา
+                        dprint(("[SmartFeed] - Checking: %s, Needs: %s, Has Fruit: %s, Is Unlocked: %s"):format(target, fruit, tostring(hasFruit), tostring(isUnlocked)))
+
+                        -- ตัดสินใจป้อนอาหารจากข้อมูลที่ตรวจสอบ
+                        if hasFruit and not isUnlocked then
+                            dprint(("[SmartFeed] พบเป้าหมาย MUTA! ป้อน '%s' ให้ Pet ใน Slot %d เพื่อปลดล็อก '%s'"):format(fruit, slotNumber, target))
+                            if feedFruitToPet(fruit, petUID) then
+                                actionTakenThisCycle = true
+                                break -- ออกจาก for loop ของ config
+                            end
                         end
                     end
                 end
             end
             
-            -- Close UI
-            local screenGui = Player.PlayerGui:FindFirstChild("ScreenBigPetSwitch")
+            -- ปิด UI ก่อนจบการทำงานของ Slot
+            local screenGui = Players.LocalPlayer.PlayerGui:FindFirstChild("ScreenBigPetSwitch")
             if screenGui then screenGui.Enabled = false end
         end
 
+        -- รอดีเลย์ก่อนเริ่มรอบถัดไป
         local delay = tonumber(Configuration.Pet.SmartFeed_Delay) or 15
-        dprint(("[SmartFeed] Cycle finished, waiting %d seconds..."):format(delay))
-        if not _waitAlive(tok, delay) then break end
-    end
-end
-
-local function runAutoCollectPet(tok)
-    local function passArea(uid)
-        local want = Configuration.Pet.Filters.Area or "Any"
-        return want == "Any" or petArea(uid) == want
-    end
-
-    while tok.alive do
-        local CollectMode = Configuration.Pet.Filters.CollectMode or "All"
-        local function claimDel(UID, PetData)
-            if PetData.RE then pcall(function() PetData.RE:FireServer("Claim") end) end
-            pcall(function() CharacterRE:FireServer("Del", UID) end)
-        end
-
-        for UID, PetData in pairs(OwnedPets) do
-            if not tok.alive then break end
-            if not (PetData and not PetData.IsBig and passArea(UID)) then continue end
-            
-            local shouldCollect = false
-            if CollectMode == "All" then
-                shouldCollect = true
-            elseif CollectMode == "Match" then
-                local petType = PetData.Type
-                local petMuta = PetData.Mutate or "None"
-                
-                local passTypeCheck = not next(Configuration.Pet.Filters.Types) or Configuration.Pet.Filters.Types[petType]
-                local passMutaCheck = not next(Configuration.Pet.Filters.Mutations) or Configuration.Pet.Filters.Mutations[petMuta]
-
-                if passTypeCheck and passMutaCheck then
-                    shouldCollect = true
-                end
-            elseif CollectMode == "Income <=" then
-                local threshold = tonumber(Configuration.Pet.Filters.IncomeBelow) or 0
-                local ps = tonumber(PetData.ProduceSpeed) or 0
-                shouldCollect = (ps <= threshold)
-            end
-            
-            if shouldCollect then
-                claimDel(UID, PetData)
-                task.wait(0.2)
-            end
-        end
-        
-        local delay = tonumber(Configuration.Pet.CollectPet_Delay) or 5
+        dprint(("[SmartFeed] ตรวจสอบครบรอบแล้ว, รอ %d วินาที..."):format(delay))
         if not _waitAlive(tok, delay) then break end
     end
 end
