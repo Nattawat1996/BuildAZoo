@@ -82,6 +82,7 @@ end)
 --==============================================================
 
 --== Script State Variables
+local IsLoadingConfig = false
 local startGiftButton, stopGiftButton
 local EnvirontmentConnections = {}
 local Players_InGame = {}
@@ -96,7 +97,7 @@ local lastKnownBigPetUIDs = {}
 local shopStatus = { upgradesDone = 0, lastAction = "Inactive" }
 
 --== UI Element Placeholders
-local shopParagraph, petPlaceParagraph, eggPlaceParagraph, giftSummaryParagraph
+local shopParagraph, petPlaceParagraph, eggPlaceParagraph, giftSummaryParagraph, sellSummaryParagraph
 local bigPetSlot1_Label, bigPetSlot2_Label, bigPetSlot3_Label
 
 --== Script Configuration Table
@@ -104,6 +105,7 @@ local Configuration = {
     Main = { AutoCollect=false, Collect_Delay=3, Collect_Type="Delay",AutoUpgradeConveyor = false,AutoUnlockTiles = false },
     Pet  = {
     AutoFeed=false, AutoFeed_Delay=10, SmartFeed=false, SmartFeed_Delay=15,
+    SmartFeed_Blacklist = {},
     AutoPlacePet=false, AutoPlacePet_Delay=1.0,
     AutoCollectPet=false, CollectPet_Delay=5,
     SmartPet=false, 
@@ -1291,14 +1293,11 @@ end
 
 --== SmartFeed Runner
 -- ================== runSmartFeed  ==================
-
 local function runSmartFeed(tok)
     local Data_OwnedPets = Data:WaitForChild("Pets", 30)
 
     while tok.alive do
-        dprint("[SmartFeed] เริ่มรอบการตรวจสอบใหม่...")
-
-        -- ดึงข้อมูลที่จำเป็นในแต่ละรอบ
+        dprint("[SmartFeed] Starting new check cycle...")
         local invAttrs = (InventoryData and InventoryData:GetAttributes()) or {}
         local currentPetSlots = {}
         for uid, slot in pairs(bigPetSlotMap) do
@@ -1307,81 +1306,81 @@ local function runSmartFeed(tok)
         
         local actionTakenThisCycle = false
 
-        -- วนลูปตามลำดับความสำคัญ Slot 1 -> 2 -> 3
         for slotNumber = 1, 3 do
-            -- ถ้ามีการป้อนอาหารไปแล้ว หรือปิดฟังก์ชัน ให้หยุดทันที
             if not tok.alive or actionTakenThisCycle then break end
             
             local petUID = currentPetSlots[slotNumber]
             if not petUID then
-                dprint(("[SmartFeed] Slot %d ไม่มี Pet, ข้าม..."):format(slotNumber))
+                dprint(("[SmartFeed] Slot %d is empty, skipping..."):format(slotNumber))
                 continue
             end
 
             local petCfg = Data_OwnedPets:FindFirstChild(petUID)
             if not petCfg or petCfg:GetAttribute("Feed") then
-                dprint(("[SmartFeed] Pet ใน Slot %d (%s) ติด Cooldown, ข้าม..."):format(slotNumber, petUID))
+                dprint(("[SmartFeed] Pet in Slot %d (%s) is on cooldown, skipping..."):format(slotNumber, petUID))
                 continue
             end
             
-            -- เปิด UI และเพิ่มเวลารอเป็น 2.5 วินาที เผื่อ UI โหลดช้า
             if not openBigPetUIForSlot(slotNumber) then
-                warn(("[SmartFeed] ไม่สามารถเปิด UI ของ Slot %d ได้, ข้าม..."):format(slotNumber))
+                warn(("[SmartFeed] Failed to open UI for Slot %d, skipping..."):format(slotNumber))
                 continue
             end
             task.wait(2.5)
 
-            -- [ลำดับที่ 1] ตรวจสอบเพื่อ "ปลดล็อก Pet" (โค้ดส่วนนี้ยังเหมือนเดิม)
-            dprint(("[SmartFeed] กำลังตรวจสอบ 'Pet Unlock' สำหรับ Slot %d"):format(slotNumber))
+            -- [Priority 1] Check for "Pet Unlocks"
+            dprint(("[SmartFeed] Checking for 'Pet Unlock' for Slot %d"):format(slotNumber))
             for _, config in ipairs(SmartFeedConfig) do
-                if config.UnlockType == "PET" and table.find(config.Slots, slotNumber) and (invAttrs[config.Fruit] or 0) > 0 then
+                -- [MODIFIED] Added blacklist check
+                local isBlacklisted = Configuration.Pet.SmartFeed_Blacklist[config.Fruit] == true
+                
+                if config.UnlockType == "PET" and table.find(config.Slots, slotNumber) and (invAttrs[config.Fruit] or 0) > 0 and not isBlacklisted then
                     local targets = (type(config.UnlockTarget) == "table") and config.UnlockTarget or {config.UnlockTarget}
                     for _, petName in ipairs(targets) do
                         if not isBigPetUnlocked(petName) then
-                            dprint(("[SmartFeed] พบเป้าหมาย PET! ป้อน '%s' ให้ Pet ใน Slot %d เพื่อปลดล็อก '%s'"):format(config.Fruit, slotNumber, petName))
+                            dprint(("[SmartFeed] PET target found! Feeding '%s' to Pet in Slot %d to unlock '%s'"):format(config.Fruit, slotNumber, petName))
                             if feedFruitToPet(config.Fruit, petUID) then
                                 actionTakenThisCycle = true
                             end
                             break
                         end
                     end
+                elseif isBlacklisted and (invAttrs[config.Fruit] or 0) > 0 then
+                     dprint(("[SmartFeed] Skipped feeding '%s' because it is blacklisted."):format(config.Fruit))
                 end
                 if actionTakenThisCycle then break end
             end
 
-            -- [ลำดับที่ 2] ตรวจสอบเพื่อ "ปลดล็อก Mutation" (พร้อม Log แบบละเอียด)
+            -- [Priority 2] Check for "Mutation Unlocks"
             if not actionTakenThisCycle then
-                dprint(("[SmartFeed] กำลังตรวจสอบ 'Mutation Unlock' สำหรับ Slot %d"):format(slotNumber))
+                dprint(("[SmartFeed] Checking for 'Mutation Unlock' for Slot %d"):format(slotNumber))
                 for _, config in ipairs(SmartFeedConfig) do
                     if config.UnlockType == "MUTATION" then
                         local target = config.UnlockTarget
                         local fruit = config.Fruit
                         local hasFruit = (invAttrs[fruit] or 0) > 0
                         local isUnlocked = isMutationUnlocked(target)
+                        -- [MODIFIED] Added blacklist check
+                        local isBlacklisted = Configuration.Pet.SmartFeed_Blacklist[fruit] == true
                         
-                        -- พิมพ์ผลการตรวจสอบทั้งหมดออกมา
-                        dprint(("[SmartFeed] - Checking: %s, Needs: %s, Has Fruit: %s, Is Unlocked: %s"):format(target, fruit, tostring(hasFruit), tostring(isUnlocked)))
+                        dprint(("[SmartFeed] - Checking: %s, Needs: %s, Has Fruit: %s, Is Unlocked: %s, Blacklisted: %s"):format(target, fruit, tostring(hasFruit), tostring(isUnlocked), tostring(isBlacklisted)))
 
-                        -- ตัดสินใจป้อนอาหารจากข้อมูลที่ตรวจสอบ
-                        if hasFruit and not isUnlocked then
-                            dprint(("[SmartFeed] พบเป้าหมาย MUTA! ป้อน '%s' ให้ Pet ใน Slot %d เพื่อปลดล็อก '%s'"):format(fruit, slotNumber, target))
+                        if hasFruit and not isUnlocked and not isBlacklisted then
+                            dprint(("[SmartFeed] MUTA target found! Feeding '%s' to Pet in Slot %d to unlock '%s'"):format(fruit, slotNumber, target))
                             if feedFruitToPet(fruit, petUID) then
                                 actionTakenThisCycle = true
-                                break -- ออกจาก for loop ของ config
+                                break 
                             end
                         end
                     end
                 end
             end
             
-            -- ปิด UI ก่อนจบการทำงานของ Slot
             local screenGui = Players.LocalPlayer.PlayerGui:FindFirstChild("ScreenBigPetSwitch")
             if screenGui then screenGui.Enabled = false end
         end
 
-        -- รอดีเลย์ก่อนเริ่มรอบถัดไป
         local delay = tonumber(Configuration.Pet.SmartFeed_Delay) or 15
-        dprint(("[SmartFeed] ตรวจสอบครบรอบแล้ว, รอ %d วินาที..."):format(delay))
+        dprint(("[SmartFeed] Cycle complete, waiting %d seconds..."):format(delay))
         if not _waitAlive(tok, delay) then break end
     end
 end
@@ -1476,8 +1475,8 @@ local function runAutoBuyEgg(tok)
                 if not tok.alive then break end
                 
                 -- Check against the new unified filters
-                local okType = (not hasType) or (Configuration.Egg.Filters.Types[egg.Type])
-                local okMut = (not hasMut) or (Configuration.Egg.Filters.Mutations[egg.Mutate])
+                local okType = (not hasType) or (Configuration.Egg.Filters.Types[egg.Type] == true)
+                local okMut = (not hasMut) or (Configuration.Egg.Filters.Mutations[egg.Mutate] == true) 
                 
                 if okType and okMut then
                     pcall(function() CharacterRE:FireServer("BuyEgg", egg.UID) end)
@@ -1561,8 +1560,8 @@ end
 --==============================================================
 local function resetGiftUIState()
     if giftSummaryParagraph then
-        giftSummaryParagraph:SetTitle("ส่งของเรียบร้อย!")
-        giftSummaryParagraph:SetDesc("กดปุ่ม 'ตรวจสอบรายการ' เพื่อเริ่มใหม่อีกครั้ง")
+        giftSummaryParagraph:SetTitle("Send Gift Complete!")
+        giftSummaryParagraph:SetDesc("Press 'Preview Items' to start a new gift.")
     end
     Configuration.Players.IsGifting = false
     currentGiftingList = {} -- Clear the list
@@ -1711,7 +1710,7 @@ local function runGifting(tok, giftList)
         end
         
         -- Update UI to show progress with the new display name
-        giftSummaryParagraph:SetTitle( ("กำลังส่งชิ้นที่ %d / %d..."):format(i, totalToSend) )
+        giftSummaryParagraph:SetTitle( ("Sending item %d of %d..."):format(i, totalToSend) )
         giftSummaryParagraph:SetDesc(itemDisplayName) -- [MODIFIED] Use the new formatted name
 
         -- Send the item
@@ -1723,6 +1722,97 @@ local function runGifting(tok, giftList)
     
     task.wait(1)
     resetGiftUIState()
+end
+--==============================================================
+--          NEW FUNCTION: GATHER ITEMS FOR SELLING PREVIEW (v2)
+--==============================================================
+local itemsToSellList = {}
+local sellSummaryParagraph -- Forward declare for the task runner
+
+local function gatherItemsForSelling()
+    local items = {}
+    local summary = {}
+    local mode = Configuration.Sell.Mode
+    
+    if mode == "All_Unplaced_Pets" then
+        for _, pet in ipairs(OwnedPetData:GetChildren()) do
+            if not Pet_Folder:FindFirstChild(pet.Name) then
+                table.insert(items, {uid = pet.Name, type = "Pet"})
+                local name = ("%s (%s)"):format(pet:GetAttribute("T") or "?", pet:GetAttribute("M") or "None")
+                summary[name] = (summary[name] or 0) + 1
+            end
+        end
+    elseif mode == "All_Unplaced_Eggs" then
+        for _, egg in ipairs(OwnedEggData:GetChildren()) do
+            if not egg:FindFirstChild("DI") then
+                table.insert(items, {uid = egg.Name, type = "Egg"})
+                local name = ("%s (%s)"):format(egg:GetAttribute("T") or "?", egg:GetAttribute("M") or "None")
+                summary[name] = (summary[name] or 0) + 1
+            end
+        end
+    elseif mode == "Filter_Eggs" then
+        for _, egg in ipairs(OwnedEggData:GetChildren()) do
+            if not egg:FindFirstChild("DI") then
+                local t, m = egg:GetAttribute("T") or "BasicEgg", egg:GetAttribute("M") or "None"
+                local typeMatch = not next(Configuration.Sell.Egg_Types) or Configuration.Sell.Egg_Types[t]
+                local mutaMatch = (not next(Configuration.Sell.Egg_Mutations) and m == "None") or (next(Configuration.Sell.Egg_Mutations) and Configuration.Sell.Egg_Mutations[m])
+                if typeMatch and mutaMatch then
+                    table.insert(items, {uid = egg.Name, type = "Egg"})
+                    local name = ("%s (%s)"):format(t, m)
+                    summary[name] = (summary[name] or 0) + 1
+                end
+            end
+        end
+    elseif mode == "Pets_Below_Income" then
+        local threshold = tonumber(Configuration.Sell.Pet_Income_Threshold) or 0
+        for _, pet in ipairs(OwnedPetData:GetChildren()) do
+            if not Pet_Folder:FindFirstChild(pet.Name) then
+                local income = GetIncomeFast(pet.Name) or 0
+                if income < threshold and income > 0 then
+                    table.insert(items, {uid = pet.Name, type = "Pet"})
+                    local name = ("%s (%s) [Inc: %d]"):format(pet:GetAttribute("T") or "?", pet:GetAttribute("M") or "None", income)
+                    summary[name] = (summary[name] or 0) + 1
+                end
+            end
+        end
+    end
+    
+    return items, summary
+end
+
+local function runSelling(tok, sellList)
+    if not sellList then return end
+    local totalToSell = #sellList
+    for i, item in ipairs(sellList) do
+        -- ถ้ากดหยุด (tok.alive กลายเป็น false) ให้ออกจากลูปทันที
+        if not tok.alive then break end
+        
+        sellSummaryParagraph:SetTitle( ("Selling item %d of %d..."):format(i, totalToSell) )
+        if item.type == "Pet" then
+            SellPet(item.uid)
+        elseif item.type == "Egg" then
+            SellEgg(item.uid)
+        end
+        task.wait(0.2)
+    end
+    
+    -- [FIX] หลังจากลูปจบ, ให้ตรวจสอบว่าจบเพราะทำงานเสร็จ หรือเพราะถูกสั่งให้หยุด
+    if tok.alive then
+        -- ถ้า tok.alive ยังเป็น true แปลว่าทำงานจนครบ
+        sellSummaryParagraph:SetTitle("Sell Complate!")
+        sellSummaryParagraph:SetDesc("Press 'Preview Items' to see what will be sold.")
+    end
+    
+    -- ไม่ว่าจะจบแบบไหน ให้ล้างรายการที่จะขายทิ้งเสมอ
+    itemsToSellList = {}
+end
+
+local function resetSellUIState(title)
+    if sellSummaryParagraph then
+        sellSummaryParagraph:SetTitle(title or "No items listed")
+        sellSummaryParagraph:SetDesc("Press 'Preview Items' to see what will be sold.")
+    end
+    itemsToSellList = {}
 end
 --==============================================================
 --           TASK RUNNERS: AUTO PLACE EGG FEATURE
@@ -1915,17 +2005,27 @@ local function runAutoPlacePet(tok)
             TaskMgr.stop("AutoPlacePet"); return
         end
 
-        -- STEP 2: Fill any empty plots first
-        local freeLandTiles = Grid_FreeList("Land")
-        local freeWaterTiles = Grid_FreeList("Water")
+        local placeAreaSetting = Configuration.Pet.Filters.Area or "Any"
+
+        local freeLandTiles = {}
+        if placeAreaSetting == "Any" or placeAreaSetting == "Land" then
+            freeLandTiles = Grid_FreeList("Land")
+        end
+
+        local freeWaterTiles = {}
+        if placeAreaSetting == "Any" or placeAreaSetting == "Water" then
+            freeWaterTiles = Grid_FreeList("Water")
+        end
+
         if #freeLandTiles > 0 or #freeWaterTiles > 0 then
             local tempUidsToPlace = table.clone(uidsToPlace)
 
             for _, uid in ipairs(tempUidsToPlace) do
                 if not tok.alive or (#freeLandTiles == 0 and #freeWaterTiles == 0) then break end
-                
+
                 local petHabitat = GetPetHabitat(_petTypeByUID(uid))
                 local targetTilePart
+
                 if petHabitat == "Land" and #freeLandTiles > 0 then
                     targetTilePart = table.remove(freeLandTiles, 1).part
                 elseif petHabitat == "Water" and #freeWaterTiles > 0 then
@@ -1954,7 +2054,7 @@ local function runAutoPlacePet(tok)
 
         local replacementFound = false
         local swapSucceeded = false
-        local placeAreaSetting = Configuration.Pet.PlaceArea or "Any"
+        local placeAreaSetting = Configuration.Pet.Filters.Area or "Any"
 
         -- Function to find and execute a replacement for a given area (Land/Water)
         local function attemptReplacement(area)
@@ -2032,6 +2132,7 @@ Options = Fluent.Options -- Assign global reference
 Tabs.Main:AddSection("Coin Collection")
 Tabs.Main:AddToggle("AutoCollect",{ Title="Auto Collect", Default=false, Callback=function(v)
     Configuration.Main.AutoCollect = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoCollect", runAutoCollect) else TaskMgr.stop("AutoCollect") end
 end })
 Tabs.Main:AddSlider("AutoCollect Delay",{ Title = "Collect Delay (sec)", Default = 3, Min = 3, Max = 180, Rounding = 0, Callback = function(v) Configuration.Main.Collect_Delay = v end })
@@ -2040,11 +2141,13 @@ Tabs.Main:AddSection("Unlocks")
 shopParagraph = Tabs.Main:AddParagraph({ Title = "Upgrade Status", Content = "Upgrades: 0 done\nLast: Inactive" })
 Tabs.Main:AddToggle("AutoUpgradeConveyor",{ Title="Auto Upgrade Conveyor", Default=false, Callback=function(v)
     Configuration.Main.AutoUpgradeConveyor = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoUpgradeConveyor", runAutoUpgradeConveyor) else TaskMgr.stop("AutoUpgradeConveyor") end
 end })
 
 Tabs.Main:AddToggle("AutoUnlockTiles",{ Title = "Auto Unlock Tiles", Default = false, Callback = function(v)
     Configuration.Main.AutoUnlockTiles = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoUnlockTiles", runAutoUnlockTiles) else TaskMgr.stop("AutoUnlockTiles"); setShopStatus("Stopped.") end
 end })
 
@@ -2060,11 +2163,13 @@ Tabs.Main:AddParagraph({ Title = "Event Information", Content = string.format("C
 
 Tabs.Main:AddToggle("Auto Claim Event Quest",{ Title="Auto Claim Quest", Default=false, Callback=function(v)
     Configuration.Event.AutoClaim = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoClaim", runAutoClaim) else TaskMgr.stop("AutoClaim") end
 end })
 
 Tabs.Main:AddToggle("Auto Lottery Ticket",{ Title="Auto Buy Lottery Ticket", Default=false, Callback=function(v)
     Configuration.Event.AutoLottery = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoLottery", runAutoLottery) else TaskMgr.stop("AutoLottery") end
 end })
 
@@ -2072,10 +2177,12 @@ end })
 Tabs.Pet:AddSection("Automation")
 Tabs.Pet:AddToggle("Auto Collect Pet",{ Title="Auto Collect Pet", Default=false, Callback=function(v)
     Configuration.Pet.AutoCollectPet = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoCollectPet", runAutoCollectPet) else TaskMgr.stop("AutoCollectPet") end
 end })
 Tabs.Pet:AddToggle("Auto Place Pet",{ Title="Auto Place Pet", Default=false, Callback=function(v)
     Configuration.Pet.AutoPlacePet = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoPlacePet", runAutoPlacePet) else _setPetPlaceStatus("Inactive", true); TaskMgr.stop("AutoPlacePet") end
 end })
 Tabs.Pet:AddToggle("SmartPet", { Title = "Enable SmartPet (Replacement)", Default = false, Callback = function(v) Configuration.Pet.SmartPet = v end })
@@ -2135,6 +2242,7 @@ Tabs.Pet:AddButton({
 Tabs.Egg:AddSection("Buy Egg")
 Tabs.Egg:AddToggle("Auto Buy Egg",{ Title="Auto Buy Egg", Default=false, Callback=function(v)
     Configuration.Egg.AutoBuyEgg = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoBuyEgg", runAutoBuyEgg) else TaskMgr.stop("AutoBuyEgg") end
 end })
 
@@ -2144,6 +2252,7 @@ Tabs.Egg:AddInput("Min Coin to Buy", { Title = "Min Coin", Default = "0", Numeri
 Tabs.Egg:AddSection("Place Egg")
 Tabs.Egg:AddToggle("Auto Place Egg",{ Title="Auto Place Egg", Default=false, Callback=function(v)
     Configuration.Egg.AutoPlaceEgg = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoPlaceEgg", runAutoPlaceEgg) else TaskMgr.stop("AutoPlaceEgg") end
 end })
 Tabs.Egg:AddDropdown("PlaceEgg Area", { Title = "Area", Values = {"Any","Land","Water"}, Default = "Any", Callback = function(v) Configuration.Egg.PlaceArea = v end })
@@ -2153,6 +2262,7 @@ Tabs.Egg:AddSlider("AutoPlaceEgg Delay",{ Title = "Place Delay", Default = 1.5, 
 Tabs.Egg:AddSection("Hatch Egg")
 Tabs.Egg:AddToggle("Auto Hatch",{ Title="Auto Hatch", Default=false, Callback=function(v)
     Configuration.Egg.AutoHatch = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoHatch", runAutoHatch) else TaskMgr.stop("AutoHatch") end
 end })
 Tabs.Egg:AddDropdown("Hatch Area",{ Title = "Area", Values = {"Any","Land","Water"}, Default = "Any", Callback = function(v) Configuration.Egg.HatchArea = v end })
@@ -2185,18 +2295,31 @@ Tabs.Shop:AddSection("Buy")
 Tabs.Shop:AddDropdown("Foods Dropdown",{ Title = "Foods to Buy", Values = PetFoods_InGame, Multi = true, Default = {}, Callback = function(v) Configuration.Shop.Food.Foods = v end })
 Tabs.Shop:AddToggle("Auto BuyFood",{ Title="Auto Buy Food", Default=false, Callback=function(v)
     Configuration.Shop.Food.AutoBuy = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoBuyFood", runAutoBuyFood) else TaskMgr.stop("AutoBuyFood") end
 end })
 Tabs.Shop:AddSection("Big Pet Feed")
 Tabs.Shop:AddToggle("Auto Feed",{ Title="Auto Feed", Default=false, Callback=function(v)
     Configuration.Pet.AutoFeed = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoFeed", runAutoFeed) else TaskMgr.stop("AutoFeed") end
 end })
 
 Tabs.Shop:AddToggle("SmartFeed",{ Title="Smart Feed", Content = "Auto Unlock Pet&Mutations", Default=false, Callback=function(v)
     Configuration.Pet.SmartFeed = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("SmartFeed", runSmartFeed) else TaskMgr.stop("SmartFeed") end
 end })
+Tabs.Shop:AddDropdown("SmartFeed Blacklist", { 
+    Title = "SmartFeed Blacklist", 
+    Description = "Select foods for SmartFeed to ignore, even if needed for unlocks.",
+    Values = PetFoods_InGame, 
+    Multi = true, 
+    Default = {}, 
+    Callback = function(v) 
+        Configuration.Pet.SmartFeed_Blacklist = v 
+    end 
+})
 Tabs.Shop:AddSlider("SmartFeed Delay",{ Title = "SmartFeed Delay", Default = 15, Min = 15, Max = 300, Rounding = 0, Callback = function(v) Configuration.Pet.SmartFeed_Delay = v end })
 Tabs.Shop:AddSection("Auto Feed Settings")
 bigPetSlot1_Label = Tabs.Shop:AddParagraph({ Title = "Slot 1:", Content = "No Big Pet Detected" })
@@ -2214,14 +2337,14 @@ local previewGiftButton, confirmAndSendButton, cancelAndStopButton
 local currentGiftingList = {} -- [MODIFIED] State variable to hold the list of UIDs to send
 
 -- 2. สร้าง UI Elements
-previewGiftButton = Tabs.Players:AddButton({ Title = "1. ตรวจสอบรายการ (Preview)", Description = "แสดงรายการของที่จะส่งตาม Filter",
+previewGiftButton = Tabs.Players:AddButton({ Title = "1. Preview Items to Send", Description = "Displays a list of items to be sent based on filters",
     Callback = function()
         -- [MODIFIED] gatherItemsForGifting now returns the raw list of UIDs too
         local sortedSummary, totalItems, targetName, rawUIDList = gatherItemsForGifting()
         
         if not sortedSummary then 
-            giftSummaryParagraph:SetTitle("ไม่พบรายการที่ตรงกับ Filter")
-            giftSummaryParagraph:SetDesc("กรุณาตรวจสอบ Filter ของคุณแล้วลองอีกครั้ง")
+            giftSummaryParagraph:SetTitle("No items match the filters")
+            giftSummaryParagraph:SetDesc("Please check your filter settings and try again.")
             currentGiftingList = {} -- Clear the list
             return 
         end
@@ -2233,34 +2356,34 @@ previewGiftButton = Tabs.Players:AddButton({ Title = "1. ตรวจสอบ�
         for _, item in ipairs(sortedSummary) do
             table.insert(summaryLines, ("- %s x %d"):format(item.name, item.count))
         end
-        giftSummaryParagraph:SetTitle(("รายการที่จะส่งให้ %s (%d ชิ้น):"):format(targetName, totalItems))
+        giftSummaryParagraph:SetTitle(("Items to send to %s (%d total):"):format(targetName, totalItems))
         giftSummaryParagraph:SetDesc(table.concat(summaryLines, "\n"))
     end
 })
 
-giftSummaryParagraph = Tabs.Players:AddParagraph({ Title = "ยังไม่มีรายการ", Content = "กดปุ่ม 'ตรวจสอบรายการ' เพื่อดูของที่จะส่ง" })
+giftSummaryParagraph = Tabs.Players:AddParagraph({ Title = "No items listed", Content = "Press 'Preview Items' to see what will be sent." })
 
-confirmAndSendButton = Tabs.Players:AddButton({ Title = "2. ยืนยันและเริ่มส่ง",
+confirmAndSendButton = Tabs.Players:AddButton({ Title = "2. Confirm and Start Sending",
     Callback = function()
         if #currentGiftingList == 0 then
-            Fluent:Notify({Title="Gifting", Content="กรุณากด 'ตรวจสอบรายการ' ก่อนเริ่มส่ง", Duration=4})
+            Fluent:Notify({Title="Gifting", Content="Please preview items before sending.", Duration=4})
             return
         end
-        giftSummaryParagraph:SetTitle("กำลังส่งของ...")
-        giftSummaryParagraph:SetDesc("กด 'ยกเลิก/หยุดส่ง' เพื่อหยุดการทำงาน")
+        giftSummaryParagraph:SetTitle("Sending in progress...")
+        giftSummaryParagraph:SetDesc("Press 'Cancel / Stop' to abort.")
         
         -- [MODIFIED] Pass currentGiftingList directly to the task
         TaskMgr.start("Gifting", runGifting, currentGiftingList) 
     end
 })
 
-cancelAndStopButton = Tabs.Players:AddButton({ Title = "3. ยกเลิก / หยุดส่ง",
+cancelAndStopButton = Tabs.Players:AddButton({ Title = "3. Cancel / Stop Selling",
     Callback = function()
         TaskMgr.stop("Gifting")
         currentGiftingList = {} -- Clear the list
         
-        giftSummaryParagraph:SetTitle("ยังไม่มีรายการ")
-        giftSummaryParagraph:SetDesc("กดปุ่ม 'ตรวจสอบรายการ' เพื่อดูของที่จะส่ง")
+        giftSummaryParagraph:SetTitle("No items listed")
+        giftSummaryParagraph:SetDesc("Press 'Preview Items' to see what will be sent.")
     end
 })
 
@@ -2319,8 +2442,6 @@ Tabs.Players:AddButton({ Title = "Reset All Gift Filters", Description = "Resets
 end})
 
 
-
-
 --============================== [TAB] Inventory =========================
 local MUTA_EMOJI = { ["None"]="🥚", ["Fire"]="🔥", ["Electirc"]="⚡", ["Diamond"]="💎", ["Golden"]="🥇", ["Dino"]="🦖" }
 local MUTA_ORDER = { "None","Fire","Electirc","Diamond","Golden","Dino" }
@@ -2328,8 +2449,8 @@ local ORDER_SET = {}; for _,k in ipairs(MUTA_ORDER) do ORDER_SET[k]=true end
 
 Tabs.Inv:AddParagraph({ Title = "Unplaced Eggs", Content = "View all eggs currently in your inventory." })
 local ResultPara = Tabs.Inv:AddParagraph({ Title = "Summary", Content = "Press Refresh to get the latest data..." })
-
 local function renderSummary()
+    -- ... (the original renderSummary function remains unchanged)
     local map = {}
     for _, egg in ipairs(OwnedEggData:GetChildren()) do
         if not egg:FindFirstChild("DI") then
@@ -2337,21 +2458,18 @@ local function renderSummary()
             map[t] = map[t] or {}; map[t][m] = (map[t][m] or 0) + 1
         end
     end
-    
     local lines, shown = {}, {}
     local function addLineFor(typeName, mutaCounts)
         table.insert(lines, "\n• " .. tostring(typeName))
         for _, key in ipairs(MUTA_ORDER) do
-            if (mutaCounts[key] or 0) > 0 then table.insert(lines, ("    - %s %s: %d"):format(MUTA_EMOJI[key] or "🔹", key, mutaCounts[key])) end
+            if (mutaCounts[key] or 0) > 0 then table.insert(lines, ("   - %s %s: %d"):format(MUTA_EMOJI[key] or "🔹", key, mutaCounts[key])) end
         end
         for m, n in pairs(mutaCounts) do
-            if not ORDER_SET[m] and (n or 0) > 0 then table.insert(lines, ("    - %s %s: %d"):format(MUTA_EMOJI[m] or "🔹", m, n)) end
+            if not ORDER_SET[m] and (n or 0) > 0 then table.insert(lines, ("   - %s %s: %d"):format(MUTA_EMOJI[m] or "🔹", m, n)) end
         end
     end
-    
     for _, t in ipairs(Eggs_InGame) do if map[t] then addLineFor(t, map[t]); shown[t]=true end end
     for t, counts in pairs(map) do if not shown[t] then addLineFor(t, counts) end end
-    
     return #lines > 0 and table.concat(lines, "\n") or "No unplaced eggs in inventory."
 end
 
@@ -2362,59 +2480,69 @@ end })
 
 Tabs.Inv:AddSection("Sell Items from Inventory")
 
+-- [NEW] Declare UI variables for the Sell feature
+local previewSellButton, confirmSellButton, cancelSellButton
+previewSellButton = Tabs.Inv:AddButton({ Title = "1. Preview Items to Sell",
+    Callback = function()
+        local items, summary = gatherItemsForSelling()
+        if #items == 0 then
+            Fluent:Notify({Title="Sell", Content="No items were found matching the criteria.", Duration=4})
+            sellSummaryParagraph:SetTitle("No items to sell")
+            sellSummaryParagraph:SetDesc("Please check your filter settings and try again.")
+            itemsToSellList = {} -- Clear list
+            return
+        end
+        
+        itemsToSellList = items -- Save the list for the sell button
+        
+        local summaryLines = {}
+        for name, count in pairs(summary) do
+            table.insert(summaryLines, ("- %s x %d"):format(name, count))
+        end
+        
+        sellSummaryParagraph:SetTitle(("About to sell %d items:"):format(#items))
+        sellSummaryParagraph:SetDesc(table.concat(summaryLines, "\n"))
+    end
+})
+
+sellSummaryParagraph = Tabs.Inv:AddParagraph({ Title = "No items listed", Content = "Press 'Preview Items' to see what will be sold." })
+
+confirmSellButton = Tabs.Inv:AddButton({ Title = "2. Confirm and Start Selling",
+    Callback = function()
+        if #itemsToSellList == 0 then
+            Fluent:Notify({Title="Sell", Content="No items to sell. Please press Preview first.", Duration=4})
+            return
+        end
+        TaskMgr.start("Selling", runSelling, itemsToSellList)
+    end
+})
+
+cancelSellButton = Tabs.Inv:AddButton({ Title = "3. Cancel / Stop Selling",
+    Callback = function()
+        TaskMgr.stop("Selling") -- สั่งให้ Task หยุดทำงาน
+        sellSummaryParagraph:SetTitle("Sale Cancelled")
+        sellSummaryParagraph:SetDesc("Press 'Preview Items' to see what will be sent.")
+        itemsToSellList = {}
+    end
+})
 Tabs.Inv:AddDropdown("Sell Mode", { Title = "Sell Mode", Values = { "All_Unplaced_Pets", "All_Unplaced_Eggs", "Filter_Eggs", "Pets_Below_Income" }, Default = "", Callback = function(v) Configuration.Sell.Mode = v end })
-Tabs.Inv:AddDropdown("Sell Egg Types", { Title = "Egg Types", Values = Eggs_InGame, Multi  = true, Default = {}, Callback = function(v) Configuration.Sell.Egg_Types = v end })
-Tabs.Inv:AddDropdown("Sell Egg Mutations", { Title = "Egg Mutations", Values = Mutations_With_None, Multi  = true, Default = {}, Callback = function(v) Configuration.Sell.Egg_Mutations = v end })
+Tabs.Inv:AddDropdown("Sell Egg Types", { Title = "Egg Types (for Filter_Eggs)", Values = Eggs_InGame, Multi  = true, Default = {}, Callback = function(v) Configuration.Sell.Egg_Types = v end })
+Tabs.Inv:AddDropdown("Sell Egg Mutations", { Title = "Egg Mutations (for Filter_Eggs)", Values = Mutations_With_None, Multi  = true, Default = {}, Callback = function(v) Configuration.Sell.Egg_Mutations = v end })
 Tabs.Inv:AddInput("Pet Income Threshold", { Title = "Sell pets with income below:", Default = "0", Numeric = true, Finished = true, Callback = function(v) Configuration.Sell.Pet_Income_Threshold = tonumber(v) or 0 end })
-
-Tabs.Inv:AddButton({ Title = "Sell Now", Description = "Sell items based on the selected mode and filters", Callback = function()
-    local mode = Configuration.Sell.Mode
-    if mode == "" then Fluent:Notify({ Title = "Sell", Content = "Please select a Sell Mode first.", Duration = 5 }); return end
-    Window:Dialog({ Title = "Confirm Sell", Content = "Are you sure?", Buttons = { { Title = "Yes", Callback = function()
-        local okCnt, failCnt, total = 0, 0, 0
-        task.spawn(function()
-            if mode == "All_Unplaced_Pets" then
-                for _, pet in ipairs(OwnedPetData:GetChildren()) do
-                    if not OwnedPets[pet.Name] then total=total+1; local ok=select(1,SellPet(pet.Name)); if ok then okCnt=okCnt+1 else failCnt=failCnt+1 end; task.wait(0.15) end
-                end
-            elseif mode == "All_Unplaced_Eggs" then
-                for _, egg in ipairs(OwnedEggData:GetChildren()) do
-                    if not egg:FindFirstChild("DI") then total=total+1; local ok=select(1,SellEgg(egg.Name)); if ok then okCnt=okCnt+1 else failCnt=failCnt+1 end; task.wait(0.15) end
-                end
-            elseif mode == "Filter_Eggs" then
-                for _, egg in ipairs(OwnedEggData:GetChildren()) do
-                    if not egg:FindFirstChild("DI") then
-                        local t, m = egg:GetAttribute("T") or "BasicEgg", egg:GetAttribute("M") or "None"
-                        local typeMatch = not next(Configuration.Sell.Egg_Types) or Configuration.Sell.Egg_Types[t]
-                        local mutaMatch = (not next(Configuration.Sell.Egg_Mutations) and m == "None") or Configuration.Sell.Egg_Mutations[m]
-                        if typeMatch and mutaMatch then total=total+1; local ok=select(1,SellEgg(egg.Name)); if ok then okCnt=okCnt+1 else failCnt=failCnt+1 end; task.wait(0.15) end
-                    end
-                end
-            elseif mode == "Pets_Below_Income" then
-                local threshold = tonumber(Configuration.Sell.Pet_Income_Threshold) or 0
-                for _, pet in ipairs(OwnedPetData:GetChildren()) do
-                    if not OwnedPets[pet.Name] and (GetInventoryIncomePerSecByUID(pet.Name) or 0) < threshold then
-                        total=total+1; local ok=select(1,SellPet(pet.Name)); if ok then okCnt=okCnt+1 else failCnt=failCnt+1 end; task.wait(0.15)
-                    end
-                end
-            end
-            Fluent:Notify({ Title = "Sell Summary", Content = ("Total: %d | Success: %d | Failed: %d"):format(total, okCnt, failCnt), Duration = 7 })
-        end)
-    end }, { Title = "No" } } })
-end })
-
-
 --============================== [TAB] Settings & About =================
 Tabs.Settings:AddSection("General")
 Tabs.Settings:AddToggle("AntiAFK",{ Title="Anti AFK", Default=false, Callback=function(v)
     ServerReplicatedDict:SetAttribute("AFK_THRESHOLD", v and 9e9 or 1080)
     Configuration.AntiAFK = v
+    if IsLoadingConfig then return end
     if v then TaskMgr.start("AntiAFK", runAntiAFK) else TaskMgr.stop("AntiAFK") end
 end })
 
 Tabs.Settings:AddSection("Performance")
 Tabs.Settings:AddToggle("FPS_Lock", { Title = "Lock FPS", Default = false, Callback = function(v)
-    Configuration.Perf.FPSLock = v; ApplyFPSLock()
+    Configuration.Perf.FPSLock = v
+    if IsLoadingConfig then return end
+    ApplyFPSLock()
     if v then TaskMgr.start("EnforceFPSLock", runEnforceFPSLock) else TaskMgr.stop("EnforceFPSLock") end
 end })
 Tabs.Settings:AddInput("FPS_Value", { Title = "FPS Cap", Default = "60", Numeric = true, Finished = true, Callback = function(v)
@@ -2557,8 +2685,9 @@ end
 --== Main Execution Flow
 task.spawn(function()
     Fluent:Notify({ Title = "Fluent", Content = "Script Loaded! Initializing...", Duration = 4 })
-    task.wait(3) -- Give the game and UI some time to settle
+    task.wait(4) -- Give the game and UI some time to settle
 
+    IsLoadingConfig = true
     Fluent:Notify({ Title = "System", Content = "Loading saved settings...", Duration = 3 })
     SaveManager:LoadAutoloadConfig()
     
@@ -2568,6 +2697,8 @@ task.spawn(function()
 
     Fluent:Notify({ Title = "System", Content = "Starting enabled tasks...", Duration = 3 })
     _autostart()
+    
+    IsLoadingConfig = false -- << [FIX] ปิด Guard เมื่อทุกอย่างเสร็จสิ้น
     
     -- Start the status refresh loop for the home page
     task.spawn(function()
