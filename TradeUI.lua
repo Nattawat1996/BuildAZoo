@@ -1,21 +1,16 @@
--- File: TradeUI.lua (Version 2 - with Layout)
+-- File: TradeUI.lua (Version 3 - with Dropdown Structure)
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
-
--- Module table
 local Module = {}
 
--- Callback placeholders
 local onSelectionChanged = function() end
 local onVisibilityChanged = function() end
 
--- UI Objects
 local ScreenGui, MainFrame
 
--- Function to create the UI if it doesn't exist
 local function createUI()
-    if ScreenGui and ScreenGui.Parent then return end -- Don't create if it already exists
+    if ScreenGui and ScreenGui.Parent then return end
 
     ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "AutoTradeSystemUI"
@@ -25,10 +20,10 @@ local function createUI()
     MainFrame = Instance.new("Frame")
     MainFrame.Name = "MainFrame"
     MainFrame.Parent = ScreenGui
-    MainFrame.BackgroundColor3 = Color3.fromRGB(31, 33, 38) -- Darker background
+    MainFrame.BackgroundColor3 = Color3.fromRGB(31, 33, 38)
     MainFrame.BorderColor3 = Color3.fromRGB(20, 20, 25)
     MainFrame.BorderSizePixel = 1
-    MainFrame.Size = UDim2.new(0, 850, 0, 550) -- Slightly larger
+    MainFrame.Size = UDim2.new(0, 850, 0, 550)
     MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
     MainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
 
@@ -36,7 +31,6 @@ local function createUI()
     UICorner.CornerRadius = UDim.new(0, 8)
     UICorner.Parent = MainFrame
 
-    -- Add a title bar
     local TitleBar = Instance.new("TextLabel")
     TitleBar.Name = "TitleBar"
     TitleBar.Parent = MainFrame
@@ -51,7 +45,6 @@ local function createUI()
     local TitleCorner = UICorner:Clone()
     TitleCorner.Parent = TitleBar
 
-    -- === Main Layout Panels ===
     local LeftPanel = Instance.new("Frame")
     LeftPanel.Name = "LeftPanel"
     LeftPanel.Parent = MainFrame
@@ -74,32 +67,58 @@ local function createUI()
     local RightPanelCorner = UICorner:Clone()
     RightPanelCorner.Parent = RightPanel
     
-    -- Now we can start adding elements into the panels
-    -- Example: Add the "Select Target" dropdown to the Left Panel
-    local TargetLabel = Instance.new("TextLabel")
-    TargetLabel.Name = "TargetLabel"
-    TargetLabel.Parent = LeftPanel
-    TargetLabel.BackgroundTransparency = 1
-    TargetLabel.Size = UDim2.new(1, -20, 0, 30)
-    TargetLabel.Position = UDim2.new(0.5, 0, 0, 80)
-    TargetLabel.AnchorPoint = Vector2.new(0.5, 0)
-    TargetLabel.Font = Enum.Font.Gotham
-    TargetLabel.Text = "Select Target"
-    TargetLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-    TargetLabel.TextSize = 14
+    -- vvv [ส่วนที่เพิ่มเข้ามาใหม่] vvv
+    -- สร้างโครงสร้างของ Dropdown "Select Target"
+    local DropdownContainer = Instance.new("Frame")
+    DropdownContainer.Name = "DropdownContainer"
+    DropdownContainer.Parent = LeftPanel
+    DropdownContainer.BackgroundTransparency = 1
+    DropdownContainer.Position = UDim2.new(0.5, 0, 0, 80)
+    DropdownContainer.Size = UDim2.new(1, -40, 0, 40)
+    DropdownContainer.AnchorPoint = Vector2.new(0.5, 0)
+    DropdownContainer.ZIndex = 2
+
+    -- ปุ่มหลักสำหรับกดเพื่อเปิด/ปิด Dropdown
+    local DropdownButton = Instance.new("TextButton")
+    DropdownButton.Name = "DropdownButton"
+    DropdownButton.Parent = DropdownContainer
+    DropdownButton.BackgroundColor3 = Color3.fromRGB(50, 52, 60)
+    DropdownButton.Size = UDim2.new(1, 0, 1, 0)
+    DropdownButton.Font = Enum.Font.Gotham
+    DropdownButton.Text = "Select Target"
+    DropdownButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+    DropdownButton.TextSize = 14
     
-    -- We would continue creating all other UI elements (buttons, sliders, tabs) here
-    -- This is just the basic structure to get started.
+    local DropdownCorner = UICorner:Clone()
+    DropdownCorner.Parent = DropdownButton
+
+    -- กรอบสำหรับแสดงรายชื่อผู้เล่น (ซ่อนไว้ก่อน)
+    local OptionsFrame = Instance.new("ScrollingFrame")
+    OptionsFrame.Name = "OptionsFrame"
+    OptionsFrame.Parent = DropdownContainer
+    OptionsFrame.BackgroundColor3 = Color3.fromRGB(50, 52, 60)
+    OptionsFrame.BorderSizePixel = 0
+    OptionsFrame.Position = UDim2.new(0, 0, 1, 5) -- อยู่ข้างล่างปุ่มหลัก
+    OptionsFrame.Size = UDim2.new(1, 0, 4, 0) -- สูง 4 เท่าของปุ่ม
+    OptionsFrame.Visible = false -- << ซ่อนไว้เป็นค่าเริ่มต้น
+    OptionsFrame.ZIndex = 3
+
+    local OptionsCorner = UICorner:Clone()
+    OptionsCorner.Parent = OptionsFrame
+
+    -- เมื่อกดปุ่มหลัก ให้สลับการมองเห็นของกรอบรายชื่อ
+    DropdownButton.MouseButton1Click:Connect(function()
+        OptionsFrame.Visible = not OptionsFrame.Visible
+    end)
+    -- ^^^ [จบส่วนที่เพิ่มเข้ามาใหม่] ^^^
 end
 
-
 function Module.Show(selectionCallback, visibilityCallback, savedSelections)
-    createUI() -- Make sure the UI is created
-    
+    createUI()
     onSelectionChanged = selectionCallback or function() end
     onVisibilityChanged = visibilityCallback or function() end
     
-    -- Logic to populate the inventory list goes here
+    -- เราจะมาเขียนโค้ดสำหรับใส่รายชื่อผู้เล่นในนี้ทีหลัง
     
     ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     ScreenGui.Enabled = true
