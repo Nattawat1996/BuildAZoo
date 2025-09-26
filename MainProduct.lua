@@ -22,7 +22,7 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
-
+local HttpService = game:GetService("HttpService")
 --== Player & Game Globals
 local Player = Players.LocalPlayer
 local PlayerUserID = Player.UserId
@@ -83,7 +83,6 @@ end)
 
 --== Script State Variables
 local IsLoadingConfig = false
-local startGiftButton, stopGiftButton
 local EnvirontmentConnections = {}
 local Players_InGame = {}
 local MyPets = {}
@@ -95,7 +94,7 @@ local bigPetSlotMap = {}
 local bigPetUpdateThread = nil
 local lastKnownBigPetUIDs = {}
 local shopStatus = { upgradesDone = 0, lastAction = "Inactive" }
-
+local fishingState = { lockedPos = nil, didFocus = false }
 --== UI Element Placeholders
 local shopParagraph, petPlaceParagraph, eggPlaceParagraph, giftSummaryParagraph, sellSummaryParagraph
 local bigPetSlot1_Label, bigPetSlot2_Label, bigPetSlot3_Label
@@ -103,6 +102,10 @@ local bigPetSlot1_Label, bigPetSlot2_Label, bigPetSlot3_Label
 --== Script Configuration Table
 local Configuration = {
     Main = { AutoCollect=false, Collect_Delay=3, Collect_Type="Delay",AutoUpgradeConveyor = false,AutoUnlockTiles = false },
+    Fishing = {
+        Auto = false,
+        Bait = "FishingBait1"
+    },
     Pet  = {
     AutoFeed=false, AutoFeed_Delay=10, SmartFeed=false, SmartFeed_Delay=15,
     SmartFeed_Blacklist = {},
@@ -162,6 +165,11 @@ local Configuration = {
     Sell = { Mode="", Egg_Types={}, Egg_Mutations={}, Pet_Income_Threshold=0 },
     Perf = { Disable3D=false, FPSLock=false, FPSValue=60, HidePets=false, HideEggs=false, HideEffects=false, HideGameUI=false },
     Lottery = { Auto=false, Delay=1800, Count=1 },
+    DiscordSync = {
+        Enabled = false,
+        WebhookURL = "",
+        Interval = 60
+    },
     Event = { AutoClaim=false, AutoClaim_Delay=3, AutoLottery=false, AutoLottery_Delay=3 },
     AntiAFK=false, Waiting=false,
 }
@@ -213,7 +221,35 @@ local function _cloneFoodMap(t)
     end
     return m
 end
+--== Gift Counter Helpers
+local function safeGetAttribute(obj, attrName, default)
+    if not obj then return default end
+    local success, result = pcall(function() return obj:GetAttribute(attrName) end)
+    return success and (result ~= nil and result or default) or default
+end
 
+--== Data Refresh Helpers (บางครั้งเกม recreate โฟลเดอร์ Data)
+local function EnsureDataRefs()
+    if not (Data and Data.Parent) then return end
+    local eg = Data:FindFirstChild("Egg")
+    if eg and eg ~= OwnedEggData then OwnedEggData = eg; dprint("[Data] OwnedEggData refreshed.") end
+    local pt = Data:FindFirstChild("Pets")
+    if pt and pt ~= OwnedPetData then OwnedPetData = pt; dprint("[Data] OwnedPetData refreshed.") end
+    local inv = Data:FindFirstChild("Asset")
+    if inv and inv ~= InventoryData then InventoryData = inv; dprint("[Data] InventoryData refreshed.") end
+end
+
+local function getTodayGiftCount()
+    local pg = Player:FindFirstChild("PlayerGui")
+    local Data = pg and pg:FindFirstChild("Data")
+    if not Data then return 0 end
+
+    local userFlag = Data:FindFirstChild("UserFlag")
+    if not userFlag then return 0 end
+
+    local v = safeGetAttribute(userFlag, "TodaySendGiftCount", 0)
+    return tonumber(v) or 0
+end
 --== UI Status Updaters
 local _APP_last, _APP_lastAt = "", 0
 local function _setPetPlaceStatus(s, force)
@@ -397,6 +433,51 @@ local function GetEggHabitat(eggTypeName)
     return "Land"
 end
 
+local function _rebuildEggQueue()
+    EnsureDataRefs()
+    local out = {}
+    if not OwnedEggData then return out end
+    local areaSetting = Configuration.Egg.PlaceArea or "Any" -- "Any","Land","Water"
+    for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
+        if eggNode and not eggNode:FindFirstChild("DI") then
+            local t = eggNode:GetAttribute("T") or "BasicEgg"
+            local m = eggNode:GetAttribute("M") or "None"
+            local typePicked = (not next(Configuration.Egg.Filters.Types)) or (Configuration.Egg.Filters.Types[t] == true)
+            local mutPicked  = (not next(Configuration.Egg.Filters.Mutations)) or (Configuration.Egg.Filters.Mutations[m] == true)
+            -- ถ้า Area เป็น Land/Water ให้รับเฉพาะไข่ที่ habitat ตรงกัน
+            local areaMatch = (areaSetting == "Any") or (GetEggHabitat(t) == areaSetting)
+            if typePicked and mutPicked and areaMatch then
+                table.insert(out, eggNode.Name)
+            end
+        end
+    end
+    return out
+end
+--==============================================================
+--                 EGG Data To Discord
+--==============================================================
+-- ฟังก์ชันสำหรับนับไข่ (นำมาจากสคริปต์นับ Inventory ของคุณ)
+local function collectEggsForDiscord()
+    local counter = {}
+    if OwnedEggData then
+        for _, egg in ipairs(OwnedEggData:GetChildren()) do
+            if egg and not egg:FindFirstChild("DI") then
+                local eggType  = egg:GetAttribute("T") or "Unknown"
+                local mutation = egg:GetAttribute("M") or "None"
+                local key = string.format("%s | %s", tostring(eggType), tostring(mutation))
+                counter[key] = (counter[key] or 0) + 1
+            end
+        end
+    end
+    local items = {}
+    for key, count in pairs(counter) do
+        table.insert(items, string.format("%s — x%d", key, count))
+    end
+    table.sort(items)
+    return items
+end
+
+
 --==============================================================
 --                 REMOTE EVENT WRAPPERS
 --==============================================================
@@ -496,6 +577,7 @@ end
 
 --== Free/Occupied Tile Functions
 local function Grid_OccupiedKeys()
+    EnsureDataRefs()
     local keys = {}
     -- From placed pets
     for _, m in ipairs(MyPets_List) do
@@ -506,16 +588,18 @@ local function Grid_OccupiedKeys()
             keys[Grid_keyXZ(v.X, v.Z)] = true
         end
     end
-    -- From placed eggs (data)
-    for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
-        local di = eggNode:FindFirstChild("DI")
-        if di then
-            keys[Grid_keyXZ(di:GetAttribute("X") or 0, di:GetAttribute("Z") or 0)] = true
+    if OwnedEggData then
+        for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
+            local di = eggNode:FindFirstChild("DI")
+            if di then
+                keys[Grid_keyXZ(di:GetAttribute("X") or 0, di:GetAttribute("Z") or 0)] = true
+            end
         end
     end
     -- From placed eggs (workspace)
     for _, model in ipairs(BlockFolder:GetChildren()) do
-        if OwnedEggData:FindFirstChild(model.Name) then
+        -- ใช้ OwnedEggData ปัจจุบันยืนยันว่าเป็นไข่ของเรา
+        if OwnedEggData and OwnedEggData:FindFirstChild(model.Name) then
             keys[Grid_keyXZ(model:GetPivot().Position.X, model:GetPivot().Position.Z)] = true
         end
     end
@@ -548,6 +632,52 @@ local function getSpatiallyLockedTileKeys()
         end
     end
     return lockedKeys
+end
+
+local function _waitForEggPlacementData(uid, timeout)
+    local deadline = os.clock() + (tonumber(timeout) or 6)
+    EnsureDataRefs()
+    local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
+
+    -- ถ้าข้อมูลใน Data หาย ให้ลองดูที่ workspace ก่อน
+    if not eggNode and BlockFolder:FindFirstChild(uid) then
+        return true
+    elseif not eggNode then
+        return false
+    end
+
+    while os.clock() < deadline do
+        -- เงื่อนไขสำเร็จ: DI โผล่ใน Data หรือมีโมเดลใน workspace
+        if eggNode:FindFirstChild("DI") or BlockFolder:FindFirstChild(uid) then
+            return true
+        end
+        -- ถ้าโฟลเดอร์ถูก recreate กลางทาง ให้ reacquire node ใหม่
+        if not eggNode.Parent or eggNode.Parent ~= OwnedEggData then
+            EnsureDataRefs()
+            eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
+            if not eggNode and BlockFolder:FindFirstChild(uid) then return true end
+            if not eggNode then return false end
+        end
+        task.wait(0.1)
+    end
+    dprint(("[_waitForEggPlacementData] Timed out waiting for UID: %s"):format(uid))
+    return false
+end
+
+local function _waitForPetPlacementData(uid, timeout)
+    local deadline = os.clock() + (tonumber(timeout) or 5) -- Wait max 5 seconds
+
+    while os.clock() < deadline do
+        local petModel = Pet_Folder:FindFirstChild(uid)
+        -- ตรวจสอบว่าโมเดลมีอยู่จริง และเป็นของเราจริงๆ (เช็ค UserId)
+        if petModel and petModel:GetAttribute("UserId") == PlayerUserID then
+            return true -- Confirmation received!
+        end
+        task.wait(0.1)
+    end
+    
+    dprint(("[_waitForPetPlacementData] Timed out waiting for pet model UID: %s"):format(uid))
+    return false -- Timed out
 end
 
 local function Grid_FreeList(area)
@@ -601,22 +731,34 @@ end))
 for _, plr in pairs(Players:GetPlayers()) do table.insert(Players_InGame, plr.Name) end
 
 --== Egg Belt Management
-local function _updateEggBeltEntry(egg)
-    if not egg then return end
-    local eggUID = tostring(egg)
-    Egg_Belt[eggUID] = {
-        UID = eggUID,
-        Mutate = (egg:GetAttribute("M") or "None"),
-        Type = (egg:GetAttribute("T") or "BasicEgg")
-    }
+table.insert(EnvirontmentConnections,Egg_Belt_Folder.ChildRemoved:Connect(function(egg)
+    task.wait(0.1); local eggUID = tostring(egg) or "None"
+    if egg and Egg_Belt[eggUID] then Egg_Belt[eggUID] = nil end
+end))
+table.insert(EnvirontmentConnections,Egg_Belt_Folder.ChildAdded:Connect(function(egg)
+    task.wait(0.1); local eggUID = tostring(egg) or "None"
+    if egg then
+        Egg_Belt[eggUID] = {
+            UID = eggUID,
+            Mutate = (egg:GetAttribute("M") or "None"),
+            Type = (egg:GetAttribute("T") or "BasicEgg")
+        }
+    end
+end))
+for _,egg in pairs(Egg_Belt_Folder:GetChildren()) do
+    task.spawn(function()
+        pcall(function()
+            local eggUID = tostring(egg) or "None"
+            if egg then
+                Egg_Belt[eggUID] = {
+                    UID = eggUID,
+                    Mutate = (egg:GetAttribute("M") or "None"),
+                    Type = (egg:GetAttribute("T") or "BasicEgg")
+                }
+            end
+        end)
+    end)
 end
-table.insert(EnvirontmentConnections, Egg_Belt_Folder.ChildRemoved:Connect(function(egg)
-    if egg and Egg_Belt[tostring(egg)] then Egg_Belt[tostring(egg)] = nil end
-end))
-table.insert(EnvirontmentConnections, Egg_Belt_Folder.ChildAdded:Connect(function(egg)
-    task.defer(_updateEggBeltEntry, egg)
-end))
-for _, egg in pairs(Egg_Belt_Folder:GetChildren()) do task.spawn(_updateEggBeltEntry, egg) end
 
 --== Pet Management
 local function _isOwnedPetModel(model)
@@ -929,22 +1071,20 @@ local function ApplyHideGameUI(on)
     local myGui = windowRoot or (fluentGui and fluentGui:FindFirstAncestorOfClass("ScreenGui")) or pg:FindFirstChildOfClass("ScreenGui")
     local whitelistNames = { PerfWhite = true }
     local whitelistInst  = {}; if myGui then whitelistInst[myGui] = true end
-    local playerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+    local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
     local popupDropGui = playerGui:FindFirstChild("PopupDrop")
-    local popupDropGui = playerGui:FindFirstChild("PopupDrop")
-    game:GetService("RunService").Heartbeat:Connect(function()
-        if popupDropGui then
-            
+    local _popupHBConn
+    _popupHBConn = RunService.Heartbeat:Connect(function()
+        if popupDropGui then            
             local controllerScript = popupDropGui:FindFirstChild("PopupDrop")
-            
-            
-            if controllerScript and controllerScript:IsA("LocalScript") and controllerScript.Disabled == false then
-                
+            if controllerScript and controllerScript:IsA("LocalScript") and controllerScript.Disabled == false then                
                 controllerScript.Disabled = true
                 print("Permanently disabled 'PopupDrop' LocalScript.")
+                if _popupHBConn then _popupHBConn:Disconnect() _popupHBConn = nil end
             end
         end
     end)
+    table.insert(EnvirontmentConnections, _popupHBConn)
     for _,ch in ipairs(pg:GetChildren()) do
         if ch:IsA("ScreenGui") and not (whitelistInst[ch] or whitelistNames[ch.Name]) then
             if on then if _uiPrev[ch] == nil then _uiPrev[ch] = ch.Enabled end; ch.Enabled = false
@@ -1431,6 +1571,105 @@ local function runAutoCollectPet(tok)
         if not _waitAlive(tok, delay) then break end
     end
 end
+--==============================================================
+--                 TASK RUNNERS: Discord
+--==============================================================
+-- Task Runner ใหม่สำหรับส่งข้อมูลไป Discord อัตโนมัติ
+local function runAutoSyncToDiscord(tok)
+    local _request = (syn and syn.request) or (http and http.request) or request
+    if not _request then
+        warn("[DiscordSync] Executor request function not found. Stopping task.")
+        pcall(function() Options["DiscordSyncToggle"]:SetValue(false) end)
+        return
+    end
+
+    local function sendDiscordMessage(webhook, message)
+         local success, err = pcall(function()
+             local body = HttpService:JSONEncode({ content = message })
+             _request({
+                 Url = webhook,
+                 Method = "POST",
+                 Headers = { ["Content-Type"] = "application/json" },
+                 Body = body
+             })
+         end)
+         if not success then
+             warn("[DiscordSync] Failed to send message:", err)
+             Fluent:Notify({ Title = "Discord Sync", Content = "ส่งข้อมูลล้มเหลว!", Duration = 5 })
+         else
+             dprint("[DiscordSync] Message sent successfully.")
+             Fluent:Notify({ Title = "Discord Sync", Content = "ส่งข้อมูลไข่สำเร็จ!", Duration = 5 })
+         end
+    end
+
+    while tok.alive do
+        dprint("[DiscordSync] Starting sync cycle.")
+        local webhookURL = Configuration.DiscordSync.WebhookURL
+        
+        if not webhookURL or #webhookURL < 20 or not (webhookURL:match("discord.com") or webhookURL:match("discordapp.com")) then
+            warn("[DiscordSync] Webhook URL is invalid or not set. Waiting for next cycle.")
+        else
+            local eggLines = collectEggsForDiscord()
+            local body = (#eggLines > 0) and table.concat(eggLines, "\n") or "ไม่มีไข่ที่ยังไม่วางในกระเป๋า"
+            local message = string.format("🥚 **Egg Inventory Update for %s**\n```\n%s\n```", Player.Name, body)
+            sendDiscordMessage(webhookURL, message)
+        end
+
+        local delayInMinutes = tonumber(Configuration.DiscordSync.Interval) or 60
+        dprint(("[DiscordSync] Sync complete. Waiting for %d minutes."):format(delayInMinutes))
+        if not _waitAlive(tok, delayInMinutes * 60) then break end
+    end
+end
+
+
+
+--==============================================================
+--                 TASK RUNNERS: FISHING FEATURES
+--==============================================================
+    local function getFishingThrowPos()
+        local char = Player.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        -- หากหาตัวละครไม่เจอ ให้ใช้ตำแหน่งกล้องแทนชั่วคราว
+        local pos = hrp and hrp.Position or workspace.CurrentCamera.CFrame.Position
+        -- ตำแหน่ง Y+10 ตามที่กำหนด
+        return pos + Vector3.new(2, 10, 0)
+    end
+    local function runAutoFishing(tok)
+    local FishingRE = GameRemoteEvents:WaitForChild("FishingRE")
+    if not FishingRE then
+        warn("[AutoFishing] ไม่พบ FishingRE! กำลังหยุดการทำงาน")
+        pcall(function() Options["AutoFishingToggle"]:SetValue(false) end)  
+        return
+    end
+
+    -- ยิง Focus แค่ครั้งแรกสุดที่เริ่ม Task
+    if not fishingState.didFocus then
+        local CharacterRE = GameRemoteEvents:WaitForChild("CharacterRE", 5)
+        if CharacterRE then
+            dprint("[AutoFishing] กำลังส่งคำสั่ง Focus เริ่มต้น...")
+            pcall(function() CharacterRE:FireServer("Focus", "FishRob") end)
+        end
+        fishingState.didFocus = true
+    end
+
+    dprint("[AutoFishing] เริ่มสแปมการตกปลา...")
+    while tok.alive do
+        -- ตรวจสอบว่ามีตำแหน่งที่ล็อคไว้หรือไม่
+        if not fishingState.lockedPos then
+            warn("[AutoFishing] ไม่พบตำแหน่งที่ล็อคไว้! กำลังหยุด...")
+            pcall(function() Options["AutoFishingToggle"]:SetValue(false) end)
+            break
+        end
+
+        local selectedBait = Configuration.Fishing.Bait
+        -- ยิง RemoteEvent ตามลำดับที่ถูกต้อง
+        FishingRE:FireServer("Start")
+        FishingRE:FireServer("Throw", {NoMove = true, Bait = selectedBait, Pos = fishingState.lockedPos})
+        FishingRE:FireServer("POUT", {NoMove = true, SUC = 1})
+        if not _waitAlive(tok, 0.01) then break end
+    end
+    dprint("[AutoFishing] หยุดการทำงานแล้ว")
+end
 
 --==============================================================
 --                 TASK RUNNERS: EGG FEATURES
@@ -1458,26 +1697,14 @@ end
 
 local function runAutoBuyEgg(tok)
     while tok.alive do
-        -- Read from the new unified filter paths
-        local hasType = next(Configuration.Egg.Filters.Types) ~= nil
-        local hasMut = next(Configuration.Egg.Filters.Mutations) ~= nil
-        
-        if not hasType and not hasMut then
-            if not _waitAlive(tok, 1) then break end
-            continue
-        end
-
         local minCoin = tonumber(Configuration.Egg.MinCoin) or 0
         local passMoney = (not Configuration.Egg.CheckMinCoin) or (getPlayerCash() >= minCoin)
         
         if passMoney then
             for _, egg in pairs(Egg_Belt) do
                 if not tok.alive then break end
-                
-                -- Check against the new unified filters
-                local okType = (not hasType) or (Configuration.Egg.Filters.Types[egg.Type] == true)
-                local okMut = (not hasMut) or (Configuration.Egg.Filters.Mutations[egg.Mutate] == true) 
-                
+                local okType = Configuration.Egg.Filters.Types[egg.Type]
+                local okMut  = Configuration.Egg.Filters.Mutations[egg.Mutate]
                 if okType and okMut then
                     pcall(function() CharacterRE:FireServer("BuyEgg", egg.UID) end)
                     task.wait(0.15 + math.random() * 0.15)
@@ -1485,7 +1712,7 @@ local function runAutoBuyEgg(tok)
             end
         end
 
-        local delay = (tonumber(Configuration.Egg.AutoBuyEgg_Delay) or 1) + math.random() * 0.4
+        local delay = (tonumber(Configuration.Egg.AutoBuyEgg_Delay) or 3) + math.random() * 0.4
         if not _waitAlive(tok, delay) then break end
     end
 end
@@ -1521,7 +1748,24 @@ end
 
 local function runAutoLottery(tok)
     while tok.alive do
-        LotteryRE:FireServer({ event = "lottery", count = 1 })
+        -- ตรวจสอบก่อนว่า InventoryData พร้อมใช้งานหรือไม่
+        if InventoryData then
+            -- อ่านค่า Attribute ที่ชื่อว่า "LotteryTicket" จากกระเป๋าโดยตรง
+            local ticketCount = InventoryData:GetAttribute("LotteryTicket")
+
+            -- แปลงค่าที่อ่านได้เป็นตัวเลข (ถ้าไม่มีค่าหรือแปลงไม่ได้ ให้เป็น 0)
+            -- แล้วตรวจสอบว่ามีตั๋วมากกว่า 0 ใบหรือไม่
+            if (tonumber(ticketCount) or 0) > 0 then
+                dprint(("[AutoLottery] พบตั๋ว %d ใบในกระเป๋า, กำลังใช้งาน..."):format(ticketCount))
+                LotteryRE:FireServer({ event = "lottery", count = 1 })
+            else
+                dprint("[AutoLottery] ไม่พบตั๋วในกระเป๋า, กำลังรอ...")
+            end
+        else
+            warn("[AutoLottery] ไม่พบ InventoryData, ไม่สามารถตรวจสอบตั๋วได้")
+        end
+
+        -- หน่วงเวลาก่อนตรวจสอบรอบถัดไป (เหมือนเดิม)
         local delay = tonumber(Configuration.Event.AutoLottery_Delay) or 60
         if not _waitAlive(tok, delay) then break end
     end
@@ -1680,11 +1924,17 @@ local function runGifting(tok, giftList)
         return
     end
     TeleportToPlayer(targetPlayer) 
-    task.wait(2)
+    task.wait(3)
     local sent = 0
     local totalToSend = #giftList
 
-    for i, uid in ipairs(giftList) do
+        for i, uid in ipairs(giftList) do
+        -- guard: หยุดเมื่อแตะ daily cap
+        local today = getTodayGiftCount()
+        if today >= 500 then
+           Fluent:Notify({Title="Gifting", Content="Daily cap reached. Stopping.", Duration=4})
+           break
+        end
         if not tok.alive then break end
         
         -- [MODIFIED] Find item name by Type and Mutation
@@ -1717,6 +1967,7 @@ local function runGifting(tok, giftList)
         CharacterRE:FireServer("Focus", uid); task.wait(0.75)
         GiftRE:FireServer(targetPlayer); task.wait(0.75)
         CharacterRE:FireServer("Focus")
+        task.wait(0.5)
         sent = sent + 1
     end
     
@@ -1818,67 +2069,148 @@ end
 --           TASK RUNNERS: AUTO PLACE EGG FEATURE
 --==============================================================
 local function runAutoPlaceEgg(tok)
+    -- [1] เตรียมข้อมูล & รีเฟรช reference
+    EnsureDataRefs()
     Fluent:Notify({ Title = "Auto Place Egg", Content = "Gathering eggs to place...", Duration = 3 })
-    
-    local allUnplacedEggs = {}
-    for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
-        if eggNode and not eggNode:FindFirstChild("DI") then
-            table.insert(allUnplacedEggs, eggNode.Name)
+
+    -- Helper สำหรับอัปเดตสถานะ (throttle)
+    local _last, _lastAt = "", 0
+    local function _setEggPlaceStatus(s, force)
+        if not eggPlaceParagraph or not eggPlaceParagraph.SetDesc then return end
+        local now = os.clock()
+        if force or s ~= _last or (now - _lastAt) > 0.2 then
+            eggPlaceParagraph:SetDesc(s)
+            _last, _lastAt = s, now
         end
     end
 
-    local areaToPlace = Configuration.Egg.PlaceArea or "Any"
+    -- รวบรวมไข่ที่ยังไม่ถูกวางทั้งหมด
+    local allUnplacedEggs = {}
+    if OwnedEggData then
+        for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
+            if eggNode and not eggNode:FindFirstChild("DI") then
+                table.insert(allUnplacedEggs, eggNode.Name)
+            end
+        end
+    end
+
+    local areaSetting = Configuration.Egg.PlaceArea or "Any"  -- "Any" | "Land" | "Water"
+
+    -- ฟังก์ชันตรวจผ่านเงื่อนไขกรอง (ชนิด/มิวเทชัน/พื้นที่)
+    local function passFilters(uid)
+        local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
+        if not eggNode then return false end
+        local t = eggNode:GetAttribute("T") or "BasicEgg"
+        local m = eggNode:GetAttribute("M") or "None"
+        local okType = (not next(Configuration.Egg.Filters.Types)) or (Configuration.Egg.Filters.Types[t] == true)
+        local okMut  = (not next(Configuration.Egg.Filters.Mutations)) or (Configuration.Egg.Filters.Mutations[m] == true)
+        if not (okType and okMut) then return false end
+        if areaSetting == "Any" then return true end
+        return GetEggHabitat(t) == areaSetting
+    end
+
+    -- กรองรายการไข่ตาม Filters + Area
     local eggsToPlace = {}
     for _, uid in ipairs(allUnplacedEggs) do
-        local eggNode = OwnedEggData:FindFirstChild(uid)
+        if passFilters(uid) then table.insert(eggsToPlace, uid) end
+    end
+
+    if #eggsToPlace == 0 then
+        local msg = "No eggs match the current filters/area."
+        _setEggPlaceStatus(msg, true)
+        Fluent:Notify({ Title = "Auto Place Egg", Content = msg, Duration = 4 })
+        return
+    end
+
+    dprint(("[AutoPlaceEgg] Eggs to place: %d"):format(#eggsToPlace))
+
+    -- [2] วนวางไข่ตามลำดับ พร้อมสถิติ/สถานะ
+    local stats = { total = #eggsToPlace, placed = 0, failed = 0, noTile = 0 }
+    for i = 1, #eggsToPlace do
+        if not tok.alive then break end
+        EnsureDataRefs()
+
+        local uid = eggsToPlace[i]
+        local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
         if eggNode then
-            local eggTypeName = eggNode:GetAttribute("T") or "BasicEgg"
-            local eggMutation = eggNode:GetAttribute("M") or "None"
-            local habitatMatches = (areaToPlace == "Any") or (GetEggHabitat(eggTypeName) == areaToPlace)
-            
-            -- Read from the new unified filter paths
-            local typePicked = not next(Configuration.Egg.Filters.Types) or Configuration.Egg.Filters.Types[eggTypeName]
-            local mutPicked = not next(Configuration.Egg.Filters.Mutations) or Configuration.Egg.Filters.Mutations[eggMutation]
-            
-            if habitatMatches and typePicked and mutPicked then
-                table.insert(eggsToPlace, uid)
+            local t = eggNode:GetAttribute("T") or "BasicEgg"
+            local m = eggNode:GetAttribute("M") or "None"
+            -- ถ้า Area=Any → เลือกพื้นที่จากถิ่นอาศัยของฟองนั้น, มิฉะนั้นใช้ค่าที่ผู้ใช้กำหนด
+            local targetArea = (areaSetting == "Any") and GetEggHabitat(t) or areaSetting
+
+            -- สถิติพื้นที่ (free/total/occupied)
+            local pool = (targetArea == "Land" or targetArea == "Water") and SortedPlots[targetArea] or SortedPlots.Any
+            local totalTiles = #pool
+            local freeList = Grid_FreeList(targetArea)
+            local freeCount = #freeList
+            local occCount = math.max(0, totalTiles - freeCount)
+
+            local left = stats.total - (i - 1)
+            _setEggPlaceStatus(
+                string.format(
+                    "▶ Placing %d/%d (left %d)\nArea: %s | Free %d / %d (Occ %d)\nEgg: %s - %s",
+                    i, stats.total, left, targetArea, freeCount, totalTiles, occCount, t, m
+                ),
+                true
+            )
+
+            if freeCount == 0 then
+                stats.noTile = stats.noTile + 1
+                Fluent:Notify({
+                    Title = "Auto Place Egg",
+                    Content = ("No free %s tiles (%d/%d used)."):format(targetArea, occCount, totalTiles),
+                    Duration = 3
+                })
+            else
+                -- พยายามวางได้หลายช่องต่อฟอง (สูงสุด 4)
+                local placedThis, tries, maxTries = false, 0, math.min(freeCount, 4)
+                while tok.alive and tries < maxTries do
+                    local node = table.remove(freeList, 1)
+                    if not node then break end
+
+                    local dst = Grid_TileCenterPos(node.part)
+                    CharacterRE:FireServer("Focus", uid)
+                    task.wait(0.25)
+                    CharacterRE:FireServer("Place", { DST = dst, ID = uid })
+
+                    local ok = _waitForEggPlacementData(uid, 6) -- ยืนยันสำเร็จจาก Data/Workspace
+                    task.wait(0.2)
+                    CharacterRE:FireServer("Focus")
+
+                    if ok then
+                        placedThis = true
+                        break
+                    end
+                    tries = tries + 1
+                    _setEggPlaceStatus(
+                        string.format("… Retrying %d/%d | %s - %s", tries + 1, maxTries, t, m)
+                    )
+                    EnsureDataRefs()
+                end
+
+                if placedThis then
+                    stats.placed = stats.placed + 1
+                    _setEggPlaceStatus(
+                        string.format("✅ Placed: %s - %s | Remaining %d", t, m, stats.total - i),
+                        true
+                    )
+                    if not _waitAlive(tok, tonumber(Configuration.Egg.AutoPlaceEgg_Delay) or 1) then break end
+                else
+                    stats.failed = stats.failed + 1
+                    _setEggPlaceStatus(
+                        string.format("❌ Failed: %s - %s on %s | Remaining %d", t, m, targetArea, stats.total - i),
+                        true
+                    )
+                end
             end
         end
     end
-    
-    dprint(("[AutoPlaceEgg] Found %d eggs matching filters."):format(#eggsToPlace))
 
-    if #eggsToPlace > 0 then
-        for i, uid in ipairs(eggsToPlace) do
-            if not tok.alive then break end
-            
-            local freeList = Grid_FreeList(areaToPlace)
-            if #freeList == 0 then
-                Fluent:Notify({ Title = "Auto Place Egg", Content = "No free space available to place eggs.", Duration = 4 })
-                break
-            end
-
-            local targetTile = freeList[1]
-            local destination = Grid_TileCenterPos(targetTile.part)
-            
-            CharacterRE:FireServer("Focus", uid)
-            task.wait(0.25)
-            CharacterRE:FireServer("Place", { DST = destination, ID = uid })
-            task.wait(0.75)
-            CharacterRE:FireServer("Focus")
-            dprint("[AutoPlaceEgg]", uid, (BlockFolder:WaitForChild(uid, 2) ~= nil) and "OK" or "FAIL")
-            if not _waitAlive(tok, tonumber(Configuration.Egg.AutoPlaceEgg_Delay) or 1) then break end
-        end
-    else
-        Fluent:Notify({ Title = "Auto Place Egg", Content = "No eggs found that match the placement filters.", Duration = 4 })
-    end
-
-    dprint("[AutoPlaceEgg] Placement task finished, toggling off.")
-    pcall(function() 
-        Options["Auto Place Egg"]:SetValue(false) 
-        Configuration.Egg.AutoPlaceEgg = false
-    end)
-    TaskMgr.stop("AutoPlaceEgg")
+    -- สรุปผลเมื่อเสร็จ
+    local summary = string.format("Placed: %d | Failed: %d | No tile: %d | Total: %d",
+                                  stats.placed, stats.failed, stats.noTile, stats.total)
+    _setEggPlaceStatus("✅ Completed\n" .. summary, true)
+    Fluent:Notify({ Title = "Auto Place Egg — Result", Content = summary, Duration = 6 })
 end
 
 --==============================================================
@@ -1970,22 +2302,34 @@ end
 local function __replacePetAtTile(oldUid, newUid, tilePart)
     local Pold = OwnedPets[oldUid]
     if (Pold and Pold.IsBig) or not tilePart then
-        return false, Pold and "skip-big" or "no-tile"
+        return false -- ไม่สามารถแทนที่ได้ (อาจเป็น Big Pet หรือไม่มีพื้นที่)
     end
     
     local destination = Grid_TileCenterPos(tilePart)
 
+    -- สั่งเก็บเงินและลบตัวเก่า
     if Pold and Pold.RE then pcall(function() Pold.RE:FireServer("Claim") end) end
     CharacterRE:FireServer("Del", oldUid)
-    task.wait(1.0) -- Delay after delete
+    task.wait(1.2) -- รอให้เซิร์ฟเวอร์ประมวลผลการลบ
 
+    -- วางตัวใหม่
     CharacterRE:FireServer("Focus", newUid); task.wait(0.5)
     CharacterRE:FireServer("Place", { DST = destination, ID = newUid })
-    task.wait(1.0) -- Delay after place
+    
+    -- << [ส่วนสำคัญ] >>
+    -- รอการยืนยันว่าวางตัวใหม่สำเร็จจริงๆ โดยใช้ฟังก์ชันที่เราเพิ่งสร้าง
+    local success = _waitForPetPlacementData(newUid, 5)
+
+    task.wait(0.2)
     CharacterRE:FireServer("Focus")
 
-    local success = Pet_Folder:WaitForChild(newUid, 3) ~= nil
-    return success, success and "replaced" or "place-failed"
+    if success then
+        dprint(("[SmartPet] Successfully replaced %s with %s"):format(oldUid, newUid))
+    else
+        dprint(("[SmartPet] Failed to place new pet %s after removing %s"):format(newUid, oldUid))
+    end
+
+    return success -- คืนค่าแค่ true (สำเร็จ) หรือ false (ล้มเหลว)
 end
 
 --== Main Runner for Auto Place Pet (SmartPet)
@@ -2074,7 +2418,13 @@ local function runAutoPlacePet(tok)
                     replacementFound = true
                     _setPetPlaceStatus(("Replacing %s: %s (%d/s) <- %s (%d/s)"):format(area:upper(), tostring(cType), candidateInc, tostring(worstUid), worstInc))
                     local ok = __replacePetAtTile(worstUid, candidateUid, tilePart)
-                    if ok then swapSucceeded = true end
+                    if ok then 
+                        swapSucceeded = true 
+                    else
+                        replacementFound = true 
+                        swapSucceeded = false
+                        return 
+                    end
                 end
             end
         end
@@ -2084,18 +2434,19 @@ local function runAutoPlacePet(tok)
 
         -- STEP 4: Decide what to do next
         if swapSucceeded then
-            _setPetPlaceStatus("Successful replace! Re-scanning...")
-            -- Loop will restart automatically
-        elseif replacementFound and not swapSucceeded then
-            _setPetPlaceStatus("Replace failed, retrying next cycle...")
-            if not _waitAlive(tok, 3) then break end
-        else -- not replacementFound
-            _setPetPlaceStatus("SmartPet: No better pets found. Stopping.", true)
-            pcall(function() Options["Auto Place Pet"]:SetValue(false) end)
-            TaskMgr.stop("AutoPlacePet"); return
-        end
-        
-        if not _waitAlive(tok, 0.5) then break end
+                  _setPetPlaceStatus("Successful replace! Re-scanning for next best pet...")
+                  -- ปล่อยให้ลูปใหญ่ (while tok.alive) ทำงานต่อเพื่อเริ่มสแกนใหม่ทั้งหมด
+            elseif replacementFound and not swapSucceeded then
+                  _setPetPlaceStatus("Placement failed! Forcing a full rescan of inventory and plots...")
+            Fluent:Notify({ Title = "Auto Place Pet", Content = "Placement failed. Rescanning...", Duration = 4 })
+                  -- ไม่ต้องรอ แค่ปล่อยให้ลูปใหญ่ทำงานรอบถัดไป มันจะรีเฟรชเอง
+            else -- not replacementFound
+                  _setPetPlaceStatus("SmartPet: No better pets found. Stopping.", true)
+                  pcall(function() Options["Auto Place Pet"]:SetValue(false) end)
+                  TaskMgr.stop("AutoPlacePet"); return
+            end
+             
+            if not _waitAlive(tok, 0.5) then break end
     end
 end
 
@@ -2151,6 +2502,53 @@ Tabs.Main:AddToggle("AutoUnlockTiles",{ Title = "Auto Unlock Tiles", Default = f
     if v then TaskMgr.start("AutoUnlockTiles", runAutoUnlockTiles) else TaskMgr.stop("AutoUnlockTiles"); setShopStatus("Stopped.") end
 end })
 
+Tabs.Main:AddSection("🎣 Fishing")
+
+Tabs.Main:AddDropdown("BaitSelection", {
+    Title = "Select Bait",
+    Values = {"FishingBait1", "FishingBait2", "FishingBait3"},
+    Default = Configuration.Fishing.Bait,
+    Callback = function(v)
+        Configuration.Fishing.Bait = v
+    end
+})
+
+Tabs.Main:AddToggle("AutoFishingToggle", {
+    Title = "Auto Fishing",
+    Default = Configuration.Fishing.Auto,
+    Callback = function(v)
+        Configuration.Fishing.Auto = v
+        if IsLoadingConfig then return end
+        
+        local character = Player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        
+        if v then -- ตอนกดเปิด
+            if hrp then
+                hrp.Anchored = true -- << แช่แข็งตัวละคร
+                dprint("[AutoFishing] Character Anchored.")
+            end
+
+            fishingState.lockedPos = getFishingThrowPos()
+            dprint("[AutoFishing] Position locked at:", fishingState.lockedPos)
+            
+            fishingState.didFocus = false
+            
+            TaskMgr.start("AutoFishing", runAutoFishing)
+        else -- ตอนกดปิด
+            TaskMgr.stop("AutoFishing")
+            
+            if hrp then
+                hrp.Anchored = false -- << ปลดการแช่แข็งตัวละคร
+                dprint("[AutoFishing] Character Unanchored.")
+            end
+            
+            fishingState.lockedPos = nil
+            dprint("[AutoFishing] Position unlocked.")
+        end
+    end
+})
+
 Tabs.Main:AddSection("🎟️ Event & Lottery")
 
 -- Find current event name
@@ -2167,7 +2565,7 @@ Tabs.Main:AddToggle("Auto Claim Event Quest",{ Title="Auto Claim Quest", Default
     if v then TaskMgr.start("AutoClaim", runAutoClaim) else TaskMgr.stop("AutoClaim") end
 end })
 
-Tabs.Main:AddToggle("Auto Lottery Ticket",{ Title="Auto Buy Lottery Ticket", Default=false, Callback=function(v)
+Tabs.Main:AddToggle("Auto Lottery Ticket",{ Title="Auto Use Lottery Ticket", Default=false, Callback=function(v)
     Configuration.Event.AutoLottery = v
     if IsLoadingConfig then return end
     if v then TaskMgr.start("AutoLottery", runAutoLottery) else TaskMgr.stop("AutoLottery") end
@@ -2258,6 +2656,12 @@ end })
 Tabs.Egg:AddDropdown("PlaceEgg Area", { Title = "Area", Values = {"Any","Land","Water"}, Default = "Any", Callback = function(v) Configuration.Egg.PlaceArea = v end })
 Tabs.Egg:AddSlider("AutoPlaceEgg Delay",{ Title = "Place Delay", Default = 1.5, Min = 0.1, Max = 5, Rounding = 1, Callback = function(v) Configuration.Egg.AutoPlaceEgg_Delay = v end })
 
+-- แสดงสถานะระหว่างวางไข่
+eggPlaceParagraph = Tabs.Egg:AddParagraph({
+    Title = "Auto Place Egg — Status",
+    Content = "Inactive"
+})
+
 ------------------ [ HATCH-SPECIFIC SETTINGS ] ------------------
 Tabs.Egg:AddSection("Hatch Egg")
 Tabs.Egg:AddToggle("Auto Hatch",{ Title="Auto Hatch", Default=false, Callback=function(v)
@@ -2331,13 +2735,40 @@ Tabs.Shop:AddDropdown("BigPetSlot3_Foods", { Title = "Food for Slot 3", Values =
 
 --============================== [TAB] Players ===========================
 Tabs.Players:AddSection("📦 Gifting")
+local dailyGiftParagraph = Tabs.Players:AddParagraph({
+    Title   = "🎁 Today Gifts: loading...",
+    Content = "The daily limit is 500 gifts per day."
+})
 
--- 1. ประกาศตัวแปร UI และ State
-local previewGiftButton, confirmAndSendButton, cancelAndStopButton
-local currentGiftingList = {} -- [MODIFIED] State variable to hold the list of UIDs to send
+local function refreshDailyGiftUI()
+    local n    = getTodayGiftCount()
+    local maxv = 500
+    local note = (n >= maxv and " (limit reached)")
+             or  (n >= maxv - 50 and " (almost at limit)")
+             or  ""
+    dailyGiftParagraph:SetTitle( string.format("🎁 Today Gifts: %d / %d%s", n, maxv, note) )
+    dailyGiftParagraph:SetDesc( "The daily limit is 500 gifts per day. Gifting will stop at the cap." )
+end
 
--- 2. สร้าง UI Elements
-previewGiftButton = Tabs.Players:AddButton({ Title = "1. Preview Items to Send", Description = "Displays a list of items to be sent based on filters",
+-- อัปเดตรอบแรก
+refreshDailyGiftUI()
+
+-- ผูกสัญญาณเมื่อค่าเปลี่ยนใน UserFlag
+do
+    local pg   = Player:FindFirstChild("PlayerGui")
+    local Data = pg and pg:FindFirstChild("Data")
+    local UF   = Data and Data:FindFirstChild("UserFlag")
+    if UF then
+        table.insert(EnvirontmentConnections,
+            UF:GetAttributeChangedSignal("TodaySendGiftCount"):Connect(refreshDailyGiftUI)
+        )
+    end
+end
+
+local currentGiftingList = {} -- State variable to hold the list of UIDs to send
+
+-- 2. สร้าง UI Elements (ไม่ต้องเก็บตัวแปรปุ่ม เพื่อลดจำนวน local)
+Tabs.Players:AddButton({ Title = "1. Preview Items to Send", Description = "Displays a list of items to be sent based on filters",
     Callback = function()
         -- [MODIFIED] gatherItemsForGifting now returns the raw list of UIDs too
         local sortedSummary, totalItems, targetName, rawUIDList = gatherItemsForGifting()
@@ -2362,8 +2793,7 @@ previewGiftButton = Tabs.Players:AddButton({ Title = "1. Preview Items to Send",
 })
 
 giftSummaryParagraph = Tabs.Players:AddParagraph({ Title = "No items listed", Content = "Press 'Preview Items' to see what will be sent." })
-
-confirmAndSendButton = Tabs.Players:AddButton({ Title = "2. Confirm and Start Sending",
+Tabs.Players:AddButton({ Title = "2. Confirm and Start Sending",
     Callback = function()
         if #currentGiftingList == 0 then
             Fluent:Notify({Title="Gifting", Content="Please preview items before sending.", Duration=4})
@@ -2377,7 +2807,7 @@ confirmAndSendButton = Tabs.Players:AddButton({ Title = "2. Confirm and Start Se
     end
 })
 
-cancelAndStopButton = Tabs.Players:AddButton({ Title = "3. Cancel / Stop Selling",
+Tabs.Players:AddButton({ Title = "3. Cancel / Stop Gifting",
     Callback = function()
         TaskMgr.stop("Gifting")
         currentGiftingList = {} -- Clear the list
@@ -2478,11 +2908,48 @@ Tabs.Inv:AddButton({ Title = "Refresh", Description = "Refresh the list of unpla
     Fluent:Notify({ Title = "Inventory", Content = "List updated.", Duration = 4 })
 end })
 
+Tabs.Inv:AddSection("Discord Sync (Egg Inventory)")
+
+Tabs.Inv:AddInput("DiscordWebhookURL", {
+    Title = "Discord Webhook URL",
+    Default = Configuration.DiscordSync.WebhookURL,
+    Placeholder = "วาง URL ของคุณที่นี่",
+    Finished = true,
+    Callback = function(v)
+        Configuration.DiscordSync.WebhookURL = v
+    end
+})
+
+Tabs.Inv:AddSlider("DiscordSyncInterval", {
+    Title = "ส่งข้อมูลทุกๆ (นาที)",
+    Default = Configuration.DiscordSync.Interval,
+    Min = 1,
+    Max = 180, -- 3 ชั่วโมง
+    Rounding = 0,
+    Callback = function(v)
+        Configuration.DiscordSync.Interval = v
+    end
+})
+
+Tabs.Inv:AddToggle("DiscordSyncToggle", {
+    Title = "เปิดใช้งานการส่งข้อมูลอัตโนมัติ",
+    Default = Configuration.DiscordSync.Enabled,
+    Callback = function(v)
+        Configuration.DiscordSync.Enabled = v
+        if IsLoadingConfig then return end
+        if v then
+            TaskMgr.start("AutoSyncToDiscord", runAutoSyncToDiscord)
+        else
+            TaskMgr.stop("AutoSyncToDiscord")
+        end
+    end
+})
+
+
 Tabs.Inv:AddSection("Sell Items from Inventory")
 
 -- [NEW] Declare UI variables for the Sell feature
-local previewSellButton, confirmSellButton, cancelSellButton
-previewSellButton = Tabs.Inv:AddButton({ Title = "1. Preview Items to Sell",
+Tabs.Inv:AddButton({ Title = "1. Preview Items to Sell",
     Callback = function()
         local items, summary = gatherItemsForSelling()
         if #items == 0 then
@@ -2507,7 +2974,7 @@ previewSellButton = Tabs.Inv:AddButton({ Title = "1. Preview Items to Sell",
 
 sellSummaryParagraph = Tabs.Inv:AddParagraph({ Title = "No items listed", Content = "Press 'Preview Items' to see what will be sold." })
 
-confirmSellButton = Tabs.Inv:AddButton({ Title = "2. Confirm and Start Selling",
+Tabs.Inv:AddButton({ Title = "2. Confirm and Start Selling",
     Callback = function()
         if #itemsToSellList == 0 then
             Fluent:Notify({Title="Sell", Content="No items to sell. Please press Preview first.", Duration=4})
@@ -2517,7 +2984,7 @@ confirmSellButton = Tabs.Inv:AddButton({ Title = "2. Confirm and Start Selling",
     end
 })
 
-cancelSellButton = Tabs.Inv:AddButton({ Title = "3. Cancel / Stop Selling",
+Tabs.Inv:AddButton({ Title = "3. Cancel / Stop Selling",
     Callback = function()
         TaskMgr.stop("Selling") -- สั่งให้ Task หยุดทำงาน
         sellSummaryParagraph:SetTitle("Sale Cancelled")
@@ -2564,20 +3031,21 @@ Tabs.About:AddParagraph({ Title = "Credit", Content = "Script created by DemiGod
 --==============================================================
 
 local StatusPara = Home:AddParagraph({ Title = "Status", Content = "Reading status..." })
-local function taskMark(name) return TaskMgr.isRunning(name) and "🟢" or "⚪" end
-
-local function refreshStatus()
+-- ลดจำนวน local บน top-level เพื่อลดโอกาสชนลิมิต 200 registers ของ Luau
+Window.RefreshStatus = function()
+  local function mark(name) return TaskMgr.isRunning(name) and "🟢" or "⚪" end
+  local function markAny(a, b) return ((TaskMgr.isRunning(a) or TaskMgr.isRunning(b)) and "🟢") or "⚪" end
   local lines = {
-    string.format("%s Auto Collect", taskMark("AutoCollect")),
-    string.format("%s Auto Upgrade", taskMark("AutoUpgradeConveyor") or taskMark("AutoUnlockTiles")),
-    string.format("%s Auto Feed", taskMark("AutoFeed") or taskMark("SmartFeed")),
-    string.format("%s Auto Place Pet", taskMark("AutoPlacePet")),
-    string.format("%s Auto Collect Pet", taskMark("AutoCollectPet")),
-    string.format("%s Auto Hatch", taskMark("AutoHatch")),
-    string.format("%s Auto Buy Egg", taskMark("AutoBuyEgg")),
-    string.format("%s Auto Buy Food", taskMark("AutoBuyFood")),
-    string.format("%s Auto Claim", taskMark("AutoClaim")),
-    string.format("%s AntiAFK", taskMark("AntiAFK")),
+    string.format("%s Auto Collect", mark("AutoCollect")),
+    string.format("%s Auto Upgrade / Unlock", markAny("AutoUpgradeConveyor","AutoUnlockTiles")),
+    string.format("%s Auto Feed", markAny("AutoFeed","SmartFeed")),
+    string.format("%s Auto Place Pet", mark("AutoPlacePet")),
+    string.format("%s Auto Collect Pet", mark("AutoCollectPet")),
+    string.format("%s Auto Hatch", mark("AutoHatch")),
+    string.format("%s Auto Buy Egg", mark("AutoBuyEgg")),
+    string.format("%s Auto Buy Food", mark("AutoBuyFood")),
+    string.format("%s Auto Claim", mark("AutoClaim")),
+    string.format("%s AntiAFK", mark("AntiAFK")),
   }
   StatusPara:SetDesc(table.concat(lines, "\n"))
 end
@@ -2594,7 +3062,7 @@ Home:AddButton({ Title = "Stop All Tasks", Description = "Stops all running auto
     for key, option in pairs(Options) do
         if option.Type == "Toggle" then pcall(function() option:SetValue(false) end) end
     end
-    refreshStatus()
+    Window.RefreshStatus()
     Fluent:Notify({ Title = "Quick Action", Content = "All tasks have been stopped.", Duration = 3 })
 end })
 
@@ -2680,33 +3148,29 @@ local function _autostart()
     if Configuration.Shop.Food.AutoBuy then TaskMgr.start("AutoBuyFood", runAutoBuyFood) end
     if Configuration.Event.AutoClaim then TaskMgr.start("AutoClaim", runAutoClaim) end
     if Configuration.Event.AutoLottery then TaskMgr.start("AutoLottery", runAutoLottery) end
+    if Configuration.DiscordSync.Enabled then TaskMgr.start("AutoSyncToDiscord", runAutoSyncToDiscord) end
 end
 
 --== Main Execution Flow
 task.spawn(function()
-    Fluent:Notify({ Title = "Fluent", Content = "Script Loaded! Initializing...", Duration = 4 })
-    task.wait(4) -- Give the game and UI some time to settle
+      Fluent:Notify({ Title = "Fluent", Content = "Script Loaded! Initializing...", Duration = 4 })
+      task.wait(4) 
 
-    IsLoadingConfig = true
-    Fluent:Notify({ Title = "System", Content = "Loading saved settings...", Duration = 3 })
-    SaveManager:LoadAutoloadConfig()
-    
-    -- Initial UI updates and data sync after loading settings
-    updateBigPetSlots()
-    task.defer(function() ResultPara:SetDesc(renderSummary()) end)
+      IsLoadingConfig = true
+      Fluent:Notify({ Title = "System", Content = "Loading saved settings...", Duration = 3 })
+      SaveManager:LoadAutoloadConfig()
 
-    Fluent:Notify({ Title = "System", Content = "Starting enabled tasks...", Duration = 3 })
-    _autostart()
-    
-    IsLoadingConfig = false -- << [FIX] ปิด Guard เมื่อทุกอย่างเสร็จสิ้น
-    
-    -- Start the status refresh loop for the home page
-    task.spawn(function()
-        while RunningEnvirontments do
-            refreshStatus()
-            task.wait(4)
-        end
-    end)
+      updateBigPetSlots()
+      task.defer(function() ResultPara:SetDesc(renderSummary()) end)
+      IsLoadingConfig = false
+      Fluent:Notify({ Title = "System", Content = "Starting enabled tasks...", Duration = 3 })
+      _autostart()
+        task.spawn(function()
+            while RunningEnvirontments do
+                Window.RefreshStatus()
+                task.wait(4)
+            end
+        end)
 end)
 
 Window:SelectTab(Home) -- Open to the Home tab by default
@@ -2724,6 +3188,13 @@ Window.Root.Destroying:Once(function()
     ApplyHideEffects(false)
     ApplyHideGameUI(false)
     Perf_Set3DEnabled(true)
+
+    pcall(function()
+        if Player.Character and Player.Character:FindFirstChild("HumanoidRootPart") then
+            Player.Character.HumanoidRootPart.Anchored = false
+            print("Failsafe: Character Unanchored.")
+        end
+    end)
 
     -- Unlock FPS if it wasn't locked by another script
     if _setFPSCap and not (getgenv().MEOWY_FPS and getgenv().MEOWY_FPS.locked) then
