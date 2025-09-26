@@ -18,13 +18,13 @@ local function createUI(playersList, savedConfig)
     WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
     -- 2. สร้างหน้าต่างหลัก
-    Window = WindUI:Window({
-        Title = "Auto Trade System",
-        Width = 850,
-        Height = 550,
-        Draggable = true,
-        Visible = false -- เริ่มต้นแบบซ่อนไว้
-    })
+   Window = WindUI:CreateWindow({ -- << แก้ไขตรงนี้
+    Title = "Auto Trade System",
+    Width = 850,
+    Height = 550,
+    Draggable = true,
+    Visible = false 
+})
 
     -- 3. สร้าง Layout 2 ฝั่ง
     local LeftGroup = Window:Group({ Side = "Left", Size = 250, Name = "Controls" })
