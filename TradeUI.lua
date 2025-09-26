@@ -23,8 +23,10 @@ local function createUI(playersList, savedConfig)
         Visible = false
     })
 
-    local LeftGroup = Window:Group({ Side = "Left", Size = 250, Name = "Controls" })
-    local RightGroup = Window:Group({ Side = "Right", Name = "Inventory Management" })
+    -- << แก้ไขตรงนี้ >>
+    local LeftGroup = Window:Groupbox({ Side = "Left", Size = 250, Name = "Controls" })
+    local RightGroup = Window:Groupbox({ Side = "Right", Name = "Inventory Management" })
+    -- << จบส่วนที่แก้ไข >>
 
     -- === ส่วนควบคุมฝั่งซ้าย ===
     LeftGroup:Image({ Image = "rbxassetid://0", Height = 128 })
@@ -51,7 +53,7 @@ local function createUI(playersList, savedConfig)
 
     LeftGroup:Dropdown({
         Title = "Mutation Filter",
-        Values = {"Any", "None"}, -- จะมาเพิ่มทีหลัง
+        Values = {"Any", "None"},
         Default = savedConfig.MutationFilter,
         Callback = function(value) onSelectionChanged_callback("MutationFilter", value) end
     })
