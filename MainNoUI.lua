@@ -3556,6 +3556,8 @@ if HEADLESS then
     Configuration.Egg.AutoPlaceEgg          = pick(c.AutoPlace or c.AutoPlaceEgg, Configuration.Egg.AutoPlaceEgg)
     Configuration.Egg.AutoHatch             = pick(c.AutoHatch,       Configuration.Egg.AutoHatch)
     Configuration.Event.AutoClaim           = pick(c.AutoClaim,       Configuration.Event.AutoClaim)
+    Configuration.Event.AutoLottery         = pick(c.AutoLottery,     Configuration.Event.AutoLottery)
+    Configuration.Event.AutoLike  = pick(c.AutoLike,       Configuration.Event.AutoLike)
     Configuration.Event.AutoClaim_Delay     = tonumber(c.AutoClaimDelay) or Configuration.Event.AutoClaim_Delay
     Configuration.Main.AutoUpgradeConveyor  = pick(c.AutoUpgrade,     Configuration.Main.AutoUpgradeConveyor)
     Configuration.Main.AutoUnlockTiles      = pick(c.AutoUnlockFarm,  Configuration.Main.AutoUnlockTiles)
