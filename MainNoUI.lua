@@ -3539,7 +3539,7 @@ task.spawn(function()
     -- status refresher loop (เหมือนเดิม)
     task.spawn(function()
         while RunningEnvirontments do
-            Window.RefreshStatus()
+            
             task.wait(4)
         end
     end)
@@ -3593,37 +3593,3 @@ if HEADLESS then
     -- เริ่มทุกงานที่เปิด flag เอาไว้
     task.defer(_autostart)
 end
-
---==============================================================
---                        CLEANUP
---==============================================================
-Window.Root.Destroying:Once(function()
-    RunningEnvirontments = false
-    TaskMgr.stopAll()
-    
-    -- Revert all performance changes
-    ApplyHidePets(false)
-    ApplyHideEggs(false)
-    ApplyHideEffects(false)
-    ApplyHideGameUI(false)
-    Perf_Set3DEnabled(true)
-
-    pcall(function()
-        if Player.Character and Player.Character:FindFirstChild("HumanoidRootPart") then
-            Player.Character.HumanoidRootPart.Anchored = false
-            print("Failsafe: Character Unanchored.")
-        end
-    end)
-
-    -- Unlock FPS if it wasn't locked by another script
-    if _setFPSCap and not (getgenv().MEOWY_FPS and getgenv().MEOWY_FPS.locked) then
-        _setFPSCap(1000)
-    end
-    
-    -- Disconnect all events
-    for _, connection in pairs(EnvirontmentConnections) do
-        if connection then pcall(function() connection:Disconnect() end) end
-    end
-
-    print("Script cleaned up successfully.")
-end)
