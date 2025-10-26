@@ -1,4 +1,6 @@
---==============================================================
+-- decrypted from locker
+
+ --==============================================================
 --                      INITIALIZATION V2.4.1 Fix bigpet smartpet
 --==============================================================
 
@@ -6,11 +8,49 @@
 if game.PlaceId ~= 105555311806207 then return end
 if getgenv().MeowyBuildAZoo then getgenv().MeowyBuildAZoo:Destroy() end
 repeat task.wait(1) until game:IsLoaded()
+--===== HEADLESS SWITCH (No-UI Mode) =====
+local EXT_CONFIG = rawget(getgenv(), "MEOWYConfig")
+local HEADLESS = EXT_CONFIG and ((EXT_CONFIG.Headless == true) or (EXT_CONFIG.NoUI == true))
 
---== Libraries
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+--==============================================================
+--                      LIBRARIES (Headless-aware)
+--==============================================================
+local Fluent, SaveManager, InterfaceManager
+
+if not HEADLESS then
+    -- โหลดจริงเมื่อไม่ใช่โหมด Headless
+    Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+    SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+    InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+else
+    -- โหมด Headless: ให้ทำ Stub แบบเบาๆ เพื่อกัน error จากการอ้างอิง
+    local function _noop(...) end
+    local function _stubTab()
+        local t = {}
+        t.AddSection = _noop
+        t.AddToggle  = function(...) return { SetValue=_noop } end
+        t.AddSlider  = function(...) return { SetValue=_noop } end
+        t.AddButton  = _noop
+        t.AddParagraph = function(...) return { SetTitle=_noop, SetDesc=_noop } end
+        t.AddDropdown = function(...) return { SetValue=_noop, SetValues=_noop } end
+        t.AddInput    = function(...) return { SetValue=_noop } end
+        return t
+    end
+    Fluent = {
+        Notify = _noop,
+        CreateWindow = function(...)
+            return {
+                AddTab = function(...) return _stubTab() end,
+                RefreshStatus = _noop,
+                SelectTab = _noop,
+                Root = { Destroying = { Once = _noop } },
+            }
+        end
+    }
+    SaveManager      = setmetatable({}, { __index=function() return _noop end })
+    InterfaceManager = setmetatable({}, { __index=function() return _noop end })
+end
+
 
 --==============================================================
 --                      SERVICES & GLOBALS
@@ -170,7 +210,7 @@ local Configuration = {
         WebhookURL = "",
         Interval = 60
     },
-    Event = { AutoClaim=false, AutoClaim_Delay=3, AutoLottery=false, AutoLottery_Delay=3,AutoLike=false, },
+    Event = { AutoClaim=true, AutoClaim_Delay=3, AutoLottery=true, AutoLottery_Delay=3,AutoLike=true, },
     AntiAFK=false, Waiting=false,
 }
 local Options -- Will be assigned by Fluent
@@ -2713,8 +2753,8 @@ local function runAutoPlacePet(tok)
             if not _waitAlive(tok, 0.5) then break end
     end
 end
-
---==============================================================
+if not HEADLESS then
+    --==============================================================
 --                       UI DEFINITION
 --==============================================================
 
@@ -3371,6 +3411,8 @@ Home:AddButton({ Title = "Visual Mode", Description = "Enables 3D, shows everyth
     Options["FPS_Lock"]:SetValue(false)
     Fluent:Notify({ Title = "Preset", Content = "Visual Mode enabled.", Duration = 4 })
 end })
+    Window:SelectTab(Home)
+end
 
 --==============================================================
 --              INITIALIZATION & FINAL SETUP
@@ -3382,8 +3424,7 @@ InterfaceManager:SetLibrary(Fluent)
 SaveManager:IgnoreThemeSettings()
 InterfaceManager:SetFolder("FluentScriptHub")
 SaveManager:SetFolder("FluentScriptHub/"..game.PlaceId)
-InterfaceManager:BuildInterfaceSection(Tabs.Settings)
-SaveManager:BuildConfigSection(Tabs.Settings)
+
 
 getgenv().MeowyBuildAZoo = Window -- Global reference for potential re-runs
 
@@ -3498,44 +3539,57 @@ task.spawn(function()
     -- status refresher loop (เหมือนเดิม)
     task.spawn(function()
         while RunningEnvirontments do
-            Window.RefreshStatus()
+            
             task.wait(4)
         end
     end)
 end)
 
-Window:SelectTab(Home) -- Open to the Home tab by default
+--===== APPLY EXTERNAL CONFIG & AUTOSTART (Headless only) =====
+if HEADLESS then
+    local c = EXT_CONFIG or {}
+    local function pick(v, def) return (v == nil) and def or v end
 
---==============================================================
---                        CLEANUP
---==============================================================
-Window.Root.Destroying:Once(function()
-    RunningEnvirontments = false
-    TaskMgr.stopAll()
-    
-    -- Revert all performance changes
-    ApplyHidePets(false)
-    ApplyHideEggs(false)
-    ApplyHideEffects(false)
-    ApplyHideGameUI(false)
-    Perf_Set3DEnabled(true)
+    -- แมปคีย์แบบสั้นของคุณ -> โครงสร้าง Configuration ภายในสคริปต์
+    Configuration.Egg.AutoBuyEgg            = pick(c.AutoBuy,         Configuration.Egg.AutoBuyEgg)
+    Configuration.Pet.AutoPlacePet          = pick(c.AutoPlace or c.AutoPlacePet, Configuration.Pet.AutoPlacePet)
+    Configuration.Egg.AutoPlaceEgg          = pick(c.AutoPlace or c.AutoPlaceEgg, Configuration.Egg.AutoPlaceEgg)
+    Configuration.Egg.AutoHatch             = pick(c.AutoHatch,       Configuration.Egg.AutoHatch)
+    Configuration.Event.AutoClaim           = pick(c.AutoClaim,       Configuration.Event.AutoClaim)
+    Configuration.Event.AutoClaim_Delay     = tonumber(c.AutoClaimDelay) or Configuration.Event.AutoClaim_Delay
+    Configuration.Main.AutoUpgradeConveyor  = pick(c.AutoUpgrade,     Configuration.Main.AutoUpgradeConveyor)
+    Configuration.Main.AutoUnlockTiles      = pick(c.AutoUnlockFarm,  Configuration.Main.AutoUnlockTiles)
+    Configuration.Pet.AutoFeed              = pick(c.AutoFeed,        Configuration.Pet.AutoFeed)
+    Configuration.Shop.Food.AutoBuy         = pick(c.AutoBuyFruit,    Configuration.Shop.Food.AutoBuy)
+    Configuration.Fishing.Auto              = pick(c.AutoFish,        Configuration.Fishing.Auto)
 
-    pcall(function()
-        if Player.Character and Player.Character:FindFirstChild("HumanoidRootPart") then
-            Player.Character.HumanoidRootPart.Anchored = false
-            print("Failsafe: Character Unanchored.")
-        end
-    end)
+    -- ตัวเลือกเสริมที่มีอยู่แล้วในสคริปต์
+    Configuration.Main.AutoCollect          = pick(c.AutoCollect,     Configuration.Main.AutoCollect)
+    Configuration.AntiAFK                   = pick(c.AntiAFK,         Configuration.AntiAFK)
 
-    -- Unlock FPS if it wasn't locked by another script
-    if _setFPSCap and not (getgenv().MEOWY_FPS and getgenv().MEOWY_FPS.locked) then
-        _setFPSCap(1000)
-    end
-    
-    -- Disconnect all events
-    for _, connection in pairs(EnvirontmentConnections) do
-        if connection then pcall(function() connection:Disconnect() end) end
+    -- Performance (มีผลใน _autostart)
+    Configuration.Perf.Disable3D            = pick(c.Disable3D,       Configuration.Perf.Disable3D)
+    Configuration.Perf.FPSLock              = pick(c.FPSLock,         Configuration.Perf.FPSLock)
+    if tonumber(c.FPSValue) then
+        Configuration.Perf.FPSValue         = tonumber(c.FPSValue)
     end
 
-    print("Script cleaned up successfully.")
-end)
+    -- รายการอาหารที่จะ AutoBuy (ส่งเป็น table multi-select ได้เลย เช่น {Pear=true, Pineapple=true})
+    if type(c.BuyFoods) == "table" then
+        Configuration.Shop.Food.Foods = c.BuyFoods
+    end
+
+    -- เหยื่อตกปลา
+    if type(c.FishingBait) == "string" then
+        Configuration.Fishing.Bait = c.FishingBait
+    end
+
+    -- ตัวกรองสำหรับ Egg (ถ้าอยากส่งมาก็รองรับ)
+    if type(c.EggFilters) == "table" then
+        Configuration.Egg.Filters.Types     = c.EggFilters.Types     or Configuration.Egg.Filters.Types
+        Configuration.Egg.Filters.Mutations = c.EggFilters.Mutations or Configuration.Egg.Filters.Mutations
+    end
+
+    -- เริ่มทุกงานที่เปิด flag เอาไว้
+    task.defer(_autostart)
+end
