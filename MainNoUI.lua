@@ -3552,16 +3552,13 @@ if HEADLESS then
 
     -- แมปคีย์แบบสั้นของคุณ -> โครงสร้าง Configuration ภายในสคริปต์
     Configuration.Egg.AutoBuyEgg            = pick(c.AutoBuy,         Configuration.Egg.AutoBuyEgg)
-    Configuration.Pet.AutoPlacePet          = pick(c.AutoPlace or c.AutoPlacePet, Configuration.Pet.AutoPlacePet)
-    Configuration.Egg.AutoPlaceEgg          = pick(c.AutoPlace or c.AutoPlaceEgg, Configuration.Egg.AutoPlaceEgg)
-    Configuration.Egg.AutoHatch             = pick(c.AutoHatch,       Configuration.Egg.AutoHatch)
     Configuration.Event.AutoClaim           = pick(c.AutoClaim,       Configuration.Event.AutoClaim)
     Configuration.Event.AutoLottery         = pick(c.AutoLottery,     Configuration.Event.AutoLottery)
     Configuration.Event.AutoLike  = pick(c.AutoLike,       Configuration.Event.AutoLike)
-    Configuration.Event.AutoClaim_Delay     = tonumber(c.AutoClaimDelay) or Configuration.Event.AutoClaim_Delay
-    Configuration.Main.AutoUpgradeConveyor  = pick(c.AutoUpgrade,     Configuration.Main.AutoUpgradeConveyor)
-    Configuration.Main.AutoUnlockTiles      = pick(c.AutoUnlockFarm,  Configuration.Main.AutoUnlockTiles)
+    Configuration.Main.AutoUpgradeConveyor  = pick(c.AutoUpgradeConveyor,     Configuration.Main.AutoUpgradeConveyor)
+    Configuration.Main.AutoUnlockTiles      = pick(c.AutoUnlockTiles,  Configuration.Main.AutoUnlockTiles)
     Configuration.Pet.AutoFeed              = pick(c.AutoFeed,        Configuration.Pet.AutoFeed)
+    Configuration.Pet.SmartFeed             = pick(c.SmartFeed,       Configuration.Pet.SmartFeed)
     Configuration.Shop.Food.AutoBuy         = pick(c.AutoBuyFruit,    Configuration.Shop.Food.AutoBuy)
     Configuration.Fishing.Auto              = pick(c.AutoFish,        Configuration.Fishing.Auto)
 
@@ -3574,6 +3571,9 @@ if HEADLESS then
     Configuration.Perf.FPSLock              = pick(c.FPSLock,         Configuration.Perf.FPSLock)
     if tonumber(c.FPSValue) then
         Configuration.Perf.FPSValue         = tonumber(c.FPSValue)
+    end
+    if type(c.SmartFeedBlacklist) == "table" then
+        Configuration.Pet.SmartFeed_Blacklist = c.SmartFeedBlacklist
     end
 
     -- รายการอาหารที่จะ AutoBuy (ส่งเป็น table multi-select ได้เลย เช่น {Pear=true, Pineapple=true})
