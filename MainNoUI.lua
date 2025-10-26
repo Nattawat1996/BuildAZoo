@@ -1065,7 +1065,19 @@ function getBigPetSlotMapping()
     end
     return slotMapping
 end
-
+-- [HEADLESS ONLY] Keep bigPetSlotMap fresh without UI
+if _NO_UI then
+    task.spawn(function()
+        while RunningEnvirontments do
+            local physicalSlots = getBigPetSlotMapping()   -- { [1]=UID?, [2]=UID?, [3]=UID? }
+            bigPetSlotMap = {}
+            for slot, uid in pairs(physicalSlots) do
+                if uid then bigPetSlotMap[uid] = slot end
+            end
+            task.wait(2) -- รีเฟรชทุก 2 วินาที
+        end
+    end)
+end
 local function updateBigPetSlots()
     if not bigPetSlot1_Label or not Options["BigPetSlot1_Foods"] then
         dprint("[updateBigPetSlots] UI is not fully ready, skipping.")
@@ -3508,7 +3520,7 @@ local function _autostart()
 
     startIf(Configuration.Pet.AutoFeed,                  "AutoFeed",             runAutoFeed)
     startIf(Configuration.Pet.SmartFeed,                 "SmartFeed",            runSmartFeed)
-    startIf(Configuration.Pet.CollectPet_Auto,           "AutoCollectPet",       runAutoCollectPet)
+    startIf(Configuration.Pet.AutoCollectPet,           "AutoCollectPet",       runAutoCollectPet)
     startIf(Configuration.Pet.AutoPlacePet,              "AutoPlacePet",         runAutoPlacePet)
 
     startIf(Configuration.Egg.AutoHatch,                 "AutoHatch",            runAutoHatch)
@@ -3579,7 +3591,59 @@ else
         end)
     end
     getgenv().MeowyBuildAZoo = _headless
+
+    ----------------------------------------------------------------------
+    -- [HEADLESS BOOT]  Apply ค่า Perf + Start tasks ตาม Configuration
+    ----------------------------------------------------------------------
+    task.defer(function()
+        -- 1) Apply performance overrides
+        if Configuration.Perf.FPSLock then
+            ApplyFPSLock()  -- ต้องมี setfpscap จาก executor ถึงจะล็อกได้จริง
+            if not TaskMgr.isRunning("EnforceFPSLock") then
+                TaskMgr.start("EnforceFPSLock", runEnforceFPSLock)
+            end
+        end
+        ApplyHidePets(   Configuration.Perf.HidePets    and true or false )
+        ApplyHideEggs(   Configuration.Perf.HideEggs    and true or false )
+        ApplyHideEffects(Configuration.Perf.HideEffects and true or false )
+        ApplyHideGameUI( Configuration.Perf.HideGameUI  and true or false )
+        if Configuration.Perf.Disable3D ~= nil then
+            Perf_Set3DEnabled(not Configuration.Perf.Disable3D)
+        end
+
+        -- 2) Start/Stop tasks ตาม flag
+        local function startIf(flag, key, runner)
+            if flag then
+                if not TaskMgr.isRunning(key) then TaskMgr.start(key, runner) end
+            else
+                if TaskMgr.isRunning(key) then TaskMgr.stop(key) end
+            end
+        end
+
+        startIf(Configuration.AntiAFK,                  "AntiAFK",             runAntiAFK)
+        startIf(Configuration.Main.AutoCollect,         "AutoCollect",         runAutoCollect)
+        startIf(Configuration.Main.AutoUpgradeConveyor, "AutoUpgradeConveyor", runAutoUpgradeConveyor)
+        startIf(Configuration.Main.AutoUnlockTiles,     "AutoUnlockTiles",     runAutoUnlockTiles)
+
+        startIf(Configuration.Pet.AutoFeed,             "AutoFeed",            runAutoFeed)
+        startIf(Configuration.Pet.SmartFeed,            "SmartFeed",           runSmartFeed)
+        startIf(Configuration.Pet.AutoCollectPet,       "AutoCollectPet",      runAutoCollectPet) -- << ใช้คีย์นี้
+        startIf(Configuration.Pet.AutoPlacePet,         "AutoPlacePet",        runAutoPlacePet)
+
+        startIf(Configuration.Egg.AutoHatch,            "AutoHatch",           runAutoHatch)
+        startIf(Configuration.Egg.AutoBuyEgg,           "AutoBuyEgg",          runAutoBuyEgg)
+        startIf(Configuration.Egg.AutoPlaceEgg,         "AutoPlaceEgg",        runAutoPlaceEgg)
+
+        startIf(Configuration.Shop.Food.AutoBuy,        "AutoBuyFood",         runAutoBuyFood)
+
+        startIf(Configuration.Event.AutoClaim,          "AutoClaim",           runAutoClaim)
+        startIf(Configuration.Event.AutoLike,           "AutoLike",            runAutoLike)
+        startIf(Configuration.Event.AutoLottery,        "AutoLottery",         runAutoLottery)
+
+        startIf(Configuration.DiscordSync.Enabled,      "AutoSyncToDiscord",   runAutoSyncToDiscord)
+    end)
 end
+
 
 if not _NO_UI and Window and Window.Root and Window.Root.Destroying then
 --==============================================================
