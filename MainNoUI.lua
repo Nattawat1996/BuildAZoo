@@ -3424,8 +3424,7 @@ InterfaceManager:SetLibrary(Fluent)
 SaveManager:IgnoreThemeSettings()
 InterfaceManager:SetFolder("FluentScriptHub")
 SaveManager:SetFolder("FluentScriptHub/"..game.PlaceId)
-InterfaceManager:BuildInterfaceSection(Tabs.Settings)
-SaveManager:BuildConfigSection(Tabs.Settings)
+
 
 getgenv().MeowyBuildAZoo = Window -- Global reference for potential re-runs
 
