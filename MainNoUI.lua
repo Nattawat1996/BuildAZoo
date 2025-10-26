@@ -3464,78 +3464,66 @@ table.insert(EnvirontmentConnections, Pet_Folder.ChildRemoved:Connect(function(p
     end)
 end))
 
---======================
--- AUTOSTART TASK TABLE
---======================
--- ทำเป็นตารางเดียว เพื่อลด upvalues ใน _autostart
-local AUTOSTART_LIST = {
-    { name = "AntiAFK",             flag = function() return Configuration.AntiAFK end,                       fn = runAntiAFK },
-    { name = "AutoCollect",         flag = function() return Configuration.Main.AutoCollect end,              fn = runAutoCollect },
-    { name = "AutoUpgradeConveyor", flag = function() return Configuration.Main.AutoUpgradeConveyor end,      fn = runAutoUpgradeConveyor },
-    { name = "AutoUnlockTiles",     flag = function() return Configuration.Main.AutoUnlockTiles end,          fn = runAutoUnlockTiles },
-
-    { name = "AutoFeed",            flag = function() return Configuration.Pet.AutoFeed end,                  fn = runAutoFeed },
-    { name = "SmartFeed",           flag = function() return Configuration.Pet.SmartFeed end,                 fn = runSmartFeed },
-    { name = "AutoCollectPet",      flag = function() return Configuration.Pet.AutoCollectPet end,            fn = runAutoCollectPet },
-    { name = "AutoPlacePet",        flag = function() return Configuration.Pet.AutoPlacePet end,              fn = runAutoPlacePet },
-
-    { name = "AutoHatch",           flag = function() return Configuration.Egg.AutoHatch end,                 fn = runAutoHatch },
-    { name = "AutoBuyEgg",          flag = function() return Configuration.Egg.AutoBuyEgg end,                fn = runAutoBuyEgg },
-    { name = "AutoPlaceEgg",        flag = function() return Configuration.Egg.AutoPlaceEgg end,              fn = runAutoPlaceEgg },
-
-    { name = "AutoBuyFood",         flag = function() return Configuration.Shop.Food.AutoBuy end,             fn = runAutoBuyFood },
-
-    { name = "AutoClaim",           flag = function() return Configuration.Event.AutoClaim end,               fn = runAutoClaim },
-    { name = "AutoLike",            flag = function() return Configuration.Event.AutoLike end,                fn = runAutoLike },
-    { name = "AutoLottery",         flag = function() return Configuration.Event.AutoLottery end,             fn = runAutoLottery },
-
-    { name = "AutoSyncToDiscord",   flag = function() return Configuration.DiscordSync.Enabled end,           fn = runAutoSyncToDiscord },
-    { name = "EnforceFPSLock",      flag = function() return Configuration.Perf.FPSLock end,                  fn = runEnforceFPSLock },
-}
-
--- helper เล็กๆ สำหรับ start/stop เพื่อลดโค้ดซ้ำ
-local function _startStopTask(shouldStart, key, runner)
-    if shouldStart then
-        if not TaskMgr.isRunning(key) then TaskMgr.start(key, runner) end
-    else
-        if TaskMgr.isRunning(key) then TaskMgr.stop(key) end
-    end
-end
-
--- แยกส่วน performance apply ออกมา เพื่อลดภาระใน _autostart
-local function _applyPerformanceOnce()
-    -- FPS Lock
+--== Auto-Start function (called after config is loaded)
+local function _autostart()
+    -- ===== Performance (apply once + กันซ้ำ) =====
     if Configuration.Perf.FPSLock then
         ApplyFPSLock()
+        if not TaskMgr.isRunning("EnforceFPSLock") then
+            TaskMgr.start("EnforceFPSLock", runEnforceFPSLock)
+        end
+    else
+        if TaskMgr.isRunning("EnforceFPSLock") then
+            TaskMgr.stop("EnforceFPSLock")
+        end
     end
-    -- apply state (ไม่ใช่เธรด)
-    ApplyHidePets(   Configuration.Perf.HidePets   == true )
-    ApplyHideEggs(   Configuration.Perf.HideEggs   == true )
-    ApplyHideEffects(Configuration.Perf.HideEffects== true )
-    ApplyHideGameUI( Configuration.Perf.HideGameUI == true )
+
+    -- ตัวพวกนี้เป็นการ apply สภาพ ไม่ใช่เธรด
+    ApplyHidePets(  Configuration.Perf.HidePets   and true or false )
+    ApplyHideEggs(  Configuration.Perf.HideEggs   and true or false )
+    ApplyHideEffects(Configuration.Perf.HideEffects and true or false )
+    ApplyHideGameUI(Configuration.Perf.HideGameUI and true or false )
     if Configuration.Perf.Disable3D ~= nil then
         Perf_Set3DEnabled(not Configuration.Perf.Disable3D)
     end
-end
 
---== Auto-Start function (called after config is loaded)
-local function _autostart()
-    -- ลดจำนวน upvalues โดยเรียกฟังก์ชันย่อย
-    _applyPerformanceOnce()
-
-    -- วนลิสต์งานจากตารางเดียว เพื่อลด register pressure
-    for i = 1, #AUTOSTART_LIST do
-        local item = AUTOSTART_LIST[i]
-        -- ป้องกัน error จาก flag ด้วย pcall
-        local ok, want = pcall(item.flag)
-        if ok then
-            _startStopTask(want and true or false, item.name, item.fn)
+    -- ===== Helper: start/stop ตาม flag และกันซ้ำ =====
+    local function startIf(flag, key, runner)
+        if flag then
+            if not TaskMgr.isRunning(key) then
+                TaskMgr.start(key, runner)
+            end
         else
-            -- ถ้าอ่าน flag ล้มเหลว ให้แน่ใจว่างานถูกหยุด
-            _startStopTask(false, item.name, item.fn)
+            if TaskMgr.isRunning(key) then
+                TaskMgr.stop(key)
+            end
         end
     end
+
+    -- ===== Auto tasks =====
+    startIf(Configuration.AntiAFK,                       "AntiAFK",              runAntiAFK)
+    startIf(Configuration.Main.AutoCollect,              "AutoCollect",          runAutoCollect)
+    startIf(Configuration.Main.AutoUpgradeConveyor,      "AutoUpgradeConveyor",  runAutoUpgradeConveyor)
+    startIf(Configuration.Main.AutoUnlockTiles,          "AutoUnlockTiles",      runAutoUnlockTiles)
+
+    startIf(Configuration.Pet.AutoFeed,                  "AutoFeed",             runAutoFeed)
+    startIf(Configuration.Pet.SmartFeed,                 "SmartFeed",            runSmartFeed)
+    startIf(Configuration.Pet.CollectPet_Auto,           "AutoCollectPet",       runAutoCollectPet)
+    startIf(Configuration.Pet.AutoPlacePet,              "AutoPlacePet",         runAutoPlacePet)
+
+    startIf(Configuration.Egg.AutoHatch,                 "AutoHatch",            runAutoHatch)
+    startIf(Configuration.Egg.AutoBuyEgg,                "AutoBuyEgg",           runAutoBuyEgg)
+    startIf(Configuration.Egg.AutoPlaceEgg,              "AutoPlaceEgg",         runAutoPlaceEgg)
+
+    startIf(Configuration.Shop.Food.AutoBuy,             "AutoBuyFood",          runAutoBuyFood)
+
+    startIf(Configuration.Event.AutoClaim,               "AutoClaim",            runAutoClaim)
+    startIf(Configuration.Event.AutoLike,                "AutoLike",             runAutoLike)       -- << สำคัญ
+    startIf(Configuration.Event.AutoLottery,             "AutoLottery",          runAutoLottery)
+
+    startIf(Configuration.DiscordSync.Enabled,           "AutoSyncToDiscord",    runAutoSyncToDiscord)
 end
+
 
 --== Main Execution Flow
 task.spawn(function()
