@@ -464,26 +464,7 @@ local function GetEggHabitat(eggTypeName)
     return "Land"
 end
 
-local function _rebuildEggQueue()
-    EnsureDataRefs()
-    local out = {}
-    if not OwnedEggData then return out end
-    local areaSetting = Configuration.Egg.PlaceArea or "Any" -- "Any","Land","Water"
-    for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
-        if eggNode and not eggNode:FindFirstChild("DI") then
-            local t = eggNode:GetAttribute("T") or "BasicEgg"
-            local m = eggNode:GetAttribute("M") or "None"
-            local typePicked = (not next(Configuration.Egg.Filters.Types)) or (Configuration.Egg.Filters.Types[t] == true)
-            local mutPicked  = (not next(Configuration.Egg.Filters.Mutations)) or (Configuration.Egg.Filters.Mutations[m] == true)
-            -- ถ้า Area เป็น Land/Water ให้รับเฉพาะไข่ที่ habitat ตรงกัน
-            local areaMatch = (areaSetting == "Any") or (GetEggHabitat(t) == areaSetting)
-            if typePicked and mutPicked and areaMatch then
-                table.insert(out, eggNode.Name)
-            end
-        end
-    end
-    return out
-end
+
 --==============================================================
 --                 EGG Data To Discord
 --==============================================================
@@ -1290,8 +1271,8 @@ local function collectAllOnce()
     for _, pet in pairs(Pet_Folder:GetChildren()) do
         if pet:GetAttribute("UserId") == PlayerUserID then
             local _s = Time:GetAttribute("s")
-            local _Value = Time.Value
-            pcall(function() pet.RE:FireServer("Claim", (bit32.bxor(PlayerUserID, _s , _Value))) end)
+            local Time_Value = Time.Value
+            pcall(function() pet.RE:FireServer("Claim", (bit32.bxor(PlayerUserID, _s , Time_Value))) end)
             n += 1
             task.wait(0.01) 
         end
@@ -1307,8 +1288,8 @@ local function runAutoCollect(tok)
             if not tok.alive then break end
             if pet:GetAttribute("UserId") == PlayerUserID then
                 local _s = Time:GetAttribute("s")
-                local _Value = Time.Value
-                pcall(function() pet.RE:FireServer("Claim",(bit32.bxor(PlayerUserID, _s , _Value))) end)
+                local Time_Value = Time.Value
+                pcall(function() pet.RE:FireServer("Claim",(bit32.bxor(PlayerUserID, _s , Time_Value))) end)
                 task.wait(0.01)
             else
                 task.wait()
@@ -1678,9 +1659,9 @@ local function runAutoCollectPet(tok)
         local CollectMode = Configuration.Pet.Filters.CollectMode or "All"
         local function claimDel(UID, PetData)
             local _s = Time:GetAttribute("s")
-            local _Value = Time.Value
-            if PetData.RE then pcall(function() PetData.RE:FireServer("Claim",bit32.bxor(PlayerUserID, _s, _Value)) end) end
-            pcall(function() CharacterRE:FireServer("Del", UID,bit32.bxor(PlayerUserID, _s, _Value)) end)
+            local Time_Value = Time.Value
+            if PetData.RE then pcall(function() PetData.RE:FireServer("Claim",bit32.bxor(PlayerUserID, _s, Time_Value)) end) end
+            pcall(function() CharacterRE:FireServer("Del", UID,bit32.bxor(PlayerUserID, _s, Time_Value)) end)
         end
 
     for UID, PetData in pairs(OwnedPets) do
@@ -2314,159 +2295,130 @@ end
 --==============================================================
 --           TASK RUNNERS: AUTO PLACE EGG FEATURE
 --==============================================================
-local function runAutoPlaceEgg(tok)
-    -- [1] เตรียมข้อมูล & รีเฟรช reference
+local function __getFilteredInventoryEggUids()
     EnsureDataRefs()
-    Fluent:Notify({ Title = "Auto Place Egg", Content = "Gathering eggs to place...", Duration = 3 })
+    local list, areaSetting = {}, (Configuration.Egg.PlaceArea or "Any")
+    if not OwnedEggData then return list end
+    for _, egg in ipairs(OwnedEggData:GetChildren()) do
+        if egg and not egg:FindFirstChild("DI") then
+            local t = egg:GetAttribute("T") or "BasicEgg"
+            local m = egg:GetAttribute("M") or "None"
+            local okType = (not next(Configuration.Egg.Filters.Types)) or (Configuration.Egg.Filters.Types[t] == true)
+            local okMut  = (not next(Configuration.Egg.Filters.Mutations)) or (Configuration.Egg.Filters.Mutations[m] == true)
+            local areaOk = (areaSetting == "Any") or (GetEggHabitat(t) == areaSetting)
+            if okType and okMut and areaOk then
+                table.insert(list, egg.Name)
+            end
+        end
+    end
+    return list
+end
 
-    -- Helper สำหรับอัปเดตสถานะ (throttle)
-    local _last, _lastAt = "", 0
+local function __placeOneEggToPos(uid, worldPos)
+    CharacterRE:FireServer("Focus", uid)      task.wait(0.25)
+    CharacterRE:FireServer("Place", { DST = worldPos, ID = uid })
+    local ok = _waitForEggPlacementData(uid, 6) -- ใช้ตัวตรวจสอบเดิมของสคริปต์
+    task.wait(0.2)
+    CharacterRE:FireServer("Focus")
+    return ok
+end
+
+local function runAutoPlaceEgg(tok)
+    -- throttle การอัปเดต UI status (แยก state ของ Egg ออกจาก Pet)
+    local _APE_last, _APE_lastAt = "", 0
     local function _setEggPlaceStatus(s, force)
         if not eggPlaceParagraph or not eggPlaceParagraph.SetDesc then return end
         local now = os.clock()
-        if force or s ~= _last or (now - _lastAt) > 0.2 then
+        if force or s ~= _APE_last or (now - _APE_lastAt) > 0.25 then
             eggPlaceParagraph:SetDesc(s)
-            _last, _lastAt = s, now
+            _APE_last, _APE_lastAt = s, now
         end
     end
 
-    -- รวบรวมไข่ที่ยังไม่ถูกวางทั้งหมด
-    local allUnplacedEggs = {}
-    if OwnedEggData then
-        for _, eggNode in ipairs(OwnedEggData:GetChildren()) do
-            if eggNode and not eggNode:FindFirstChild("DI") then
-                table.insert(allUnplacedEggs, eggNode.Name)
-            end
-        end
-    end
+    _setEggPlaceStatus("Starting...")
+    Fluent:Notify({ Title = "Auto Place Egg", Content = "Starting...", Duration = 3 })
 
-    local areaSetting = Configuration.Egg.PlaceArea or "Any"  -- "Any" | "Land" | "Water"
-
-    -- ฟังก์ชันตรวจผ่านเงื่อนไขกรอง (ชนิด/มิวเทชัน/พื้นที่)
-    local function passFilters(uid)
-        local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
-        if not eggNode then return false end
-        local t = eggNode:GetAttribute("T") or "BasicEgg"
-        local m = eggNode:GetAttribute("M") or "None"
-        local okType = (not next(Configuration.Egg.Filters.Types)) or (Configuration.Egg.Filters.Types[t] == true)
-        local okMut  = (not next(Configuration.Egg.Filters.Mutations)) or (Configuration.Egg.Filters.Mutations[m] == true)
-        if not (okType and okMut) then return false end
-        if areaSetting == "Any" then return true end
-        return GetEggHabitat(t) == areaSetting
-    end
-
-    -- กรองรายการไข่ตาม Filters + Area
-    local eggsToPlace = {}
-    for _, uid in ipairs(allUnplacedEggs) do
-        if passFilters(uid) then table.insert(eggsToPlace, uid) end
-    end
-
-    if #eggsToPlace == 0 then
-        local msg = "No eggs match the current filters/area."
-        _setEggPlaceStatus(msg, true)
-        Fluent:Notify({ Title = "Auto Place Egg", Content = msg, Duration = 4 })
-        return
-    end
-
-    dprint(("[AutoPlaceEgg] Eggs to place: %d"):format(#eggsToPlace))
-
-    -- [2] วนวางไข่ตามลำดับ พร้อมสถิติ/สถานะ
-    local stats = { total = #eggsToPlace, placed = 0, failed = 0, noTile = 0 }
-    for i = 1, #eggsToPlace do
-        if not tok.alive then break end
+    while tok.alive do
         EnsureDataRefs()
 
-        local uid = eggsToPlace[i]
-        local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
-        if eggNode then
-            local t = eggNode:GetAttribute("T") or "BasicEgg"
-            local m = eggNode:GetAttribute("M") or "None"
-            -- ถ้า Area=Any → เลือกพื้นที่จากถิ่นอาศัยของฟองนั้น, มิฉะนั้นใช้ค่าที่ผู้ใช้กำหนด
-            local targetArea = (areaSetting == "Any") and GetEggHabitat(t) or areaSetting
+        -- 1) ดึงคิวไข่ที่ “ยังไม่ถูกวาง” และ “ตรงกับ Filter/Area”
+        local uids = __getFilteredInventoryEggUids()
+        if #uids == 0 then
+            _setEggPlaceStatus("Stopped: No matching unplaced eggs.", true)
+            pcall(function() Options["Auto Place Egg"]:SetValue(false) end)
+            TaskMgr.stop("AutoPlaceEgg"); return
+        end
 
-            -- สถิติพื้นที่ (free/total/occupied)
-            local pool = (targetArea == "Land" or targetArea == "Water") and SortedPlots[targetArea] or SortedPlots.Any
-            local totalTiles = #pool
-            local freeList = Grid_FreeList(targetArea)
-            local freeCount = #freeList
-            local occCount = math.max(0, totalTiles - freeCount)
+        -- 2) เตรียมลิสต์ช่องว่างตามพื้นที่ (เหมือน Auto place pet)
+        local placeArea = Configuration.Egg.PlaceArea or "Any"   -- Any | Land | Water
+        local freeLand, freeWater = {}, {}
+        if placeArea == "Any" or placeArea == "Land"  then freeLand  = Grid_FreeList("Land")  end
+        if placeArea == "Any" or placeArea == "Water" then freeWater = Grid_FreeList("Water") end
 
-            local left = stats.total - (i - 1)
-            _setEggPlaceStatus(
-                string.format(
-                    "▶ Placing %d/%d (left %d)\nArea: %s | Free %d / %d (Occ %d)\nEgg: %s - %s",
-                    i, stats.total, left, targetArea, freeCount, totalTiles, occCount, t, m
-                ),
-                true
-            )
+        if (#freeLand == 0 and #freeWater == 0) then
+            local totalTiles = (#SortedPlots.Land + #SortedPlots.Water)
+            _setEggPlaceStatus(("⛔ No free tiles. Stopping. (Total tiles: %d)"):format(totalTiles), true)
+            pcall(function() Options["Auto Place Egg"]:SetValue(false) end)
+            TaskMgr.stop("AutoPlaceEgg"); return
+        end
 
-            if freeCount == 0 then
-                stats.noTile = stats.noTile + 1
+        local function popTileFor(area)
+            local list = (area == "Water") and freeWater or freeLand
+            if #list == 0 then return nil end
+            local node = table.remove(list, 1)
+            return node and node.part or nil
+        end
 
-                local msg = ("No free %s tiles (%d/%d used). Auto Place Egg stopped."):format(
-                    targetArea, occCount, totalTiles
-                )
-                _setEggPlaceStatus("⛔ " .. msg, true)
+        -- 3) วางไข่ลงช่องว่าง: เดินคิวไข่ → เลือกพื้นที่ให้ถูก (Land/Water) → วาง
+        local total, placed, failed = #uids, 0, 0
+        for _, uid in ipairs(table.clone(uids)) do
+            if not tok.alive then break end
+            EnsureDataRefs()
 
-                -- แจ้งเตือนผู้ใช้
-                Fluent:Notify({
-                    Title   = "Auto Place Egg",
-                    Content = msg,
-                    Duration = 5
-                })
-                pcall(function()
-                    if Options and Options["Auto Place Egg"] and Options["Auto Place Egg"].SetValue then
-                        Options["Auto Place Egg"]:SetValue(false)
-                    end
-                end)
-                TaskMgr.stop("AutoPlaceEgg"); return
+            local eggNode = OwnedEggData and OwnedEggData:FindFirstChild(uid)
+            if not eggNode or eggNode:FindFirstChild("DI") then
+                -- ถูกวางไปแล้ว/หายไประหว่างทาง ก็ข้าม
             else
-                local placedThis, tries, maxTries = false, 0, math.min(freeCount, 4)
-                while tok.alive and tries < maxTries do
-                    local node = table.remove(freeList, 1)
-                    if not node then break end
+                local t = eggNode:GetAttribute("T") or "BasicEgg"
+                local m = eggNode:GetAttribute("M") or "None"
+                -- หากผู้ใช้เลือก Any ให้ใช้ “ถิ่นอาศัยของไข่” กำหนด Land/Water อัตโนมัติ
+                local habitat = (placeArea == "Any") and GetEggHabitat(t) or placeArea
 
-                    local dst = Grid_TileCenterPos(node.part)
-                    CharacterRE:FireServer("Focus", uid)
-                    task.wait(0.25)
-                    CharacterRE:FireServer("Place", { DST = dst, ID = uid })
+                _setEggPlaceStatus(("Placing %d/%d | Area:%s | Egg: %s - %s")
+                    :format(placed + 1, total, habitat, t, m))
 
-                    local ok = _waitForEggPlacementData(uid, 6)
-                    task.wait(0.2)
-                    CharacterRE:FireServer("Focus")
-
-                    if ok then
-                        placedThis = true
-                        break
+                -- เพิ่มความทนทาน: ลองได้สูงสุด 8 ครั้ง + รีเฟรชฟรีลิสต์หลังพลาด
+                local tries, success = 0, false
+                while tok.alive and tries < 8 do
+                    local tilePart = popTileFor(habitat)
+                    if not tilePart then break end
+                    local dst = Grid_TileCenterPos(tilePart)
+                    success = __placeOneEggToPos(uid, dst)
+                    tries += 1
+                    if success then break end
+                    -- รีเฟรชลิสต์ช่องว่างของพื้นที่นั้น ๆ เผื่อมีการอัปเดตกลางทาง
+                    if habitat == "Land" then
+                        freeLand = Grid_FreeList("Land")
+                    else
+                        freeWater = Grid_FreeList("Water")
                     end
-                    tries = tries + 1
-                    _setEggPlaceStatus(
-                        string.format("… Retrying %d/%d | %s - %s", tries + 1, maxTries, t, m)
-                    )
-                    EnsureDataRefs()
                 end
 
-                if placedThis then
-                    stats.placed = stats.placed + 1
-                    _setEggPlaceStatus(
-                        string.format("✅ Placed: %s - %s | Remaining %d", t, m, stats.total - i),
-                        true
-                    )
+                if success then
+                    placed += 1
                     if not _waitAlive(tok, tonumber(Configuration.Egg.AutoPlaceEgg_Delay) or 1) then break end
                 else
-                    stats.failed = stats.failed + 1
-                    _setEggPlaceStatus(
-                        string.format("❌ Failed: %s - %s on %s | Remaining %d", t, m, targetArea, stats.total - i),
-                        true
-                    )
+                    failed += 1
                 end
             end
         end
+
+        _setEggPlaceStatus(("✅ Placed %d, ❌ Failed %d, Left in bag %d")
+            :format(placed, failed, math.max(0, total - placed - failed)), true)
+
+        -- หมุนรอบใหม่เพื่อเก็บไข่ที่เหลือในกระเป๋า หากยังมีช่องว่างเหลือ
+        if not _waitAlive(tok, 0.25) then break end
     end
-    local summary = string.format("Placed: %d | Failed: %d | No tile: %d | Total: %d",
-                                  stats.placed, stats.failed, stats.noTile, stats.total)
-    _setEggPlaceStatus("✅ Completed\n" .. summary, true)
-    Fluent:Notify({ Title = "Auto Place Egg — Result", Content = summary, Duration = 6 })
 end
 
 --==============================================================
@@ -2531,6 +2483,7 @@ local function __placeOnePetToPos(uid, worldPos)
     return Pet_Folder:WaitForChild(uid, 3) ~= nil
 end
 
+
 --== Helper: Find the weakest pet currently placed in a specific area
 local function __findWorstPlacedPetInArea(areaWant)
     local worstUid, worstInc, worstTileKey, worstTilePart = nil, nil, nil, nil
@@ -2557,6 +2510,8 @@ end
 --== Helper: Replace a weak pet with a stronger one
 local function __replacePetAtTile(oldUid, newUid, tilePart)
     local Pold = OwnedPets[oldUid]
+    local _s = Time:GetAttribute("s")
+    local Time_Value = Time.Value
     if (Pold and (Pold.IsBig or Pold.BlockedF)) or not tilePart then
         return false
     end
@@ -2564,8 +2519,9 @@ local function __replacePetAtTile(oldUid, newUid, tilePart)
     local destination = Grid_TileCenterPos(tilePart)
 
     -- สั่งเก็บเงินและลบตัวเก่า
-    if Pold and Pold.RE then pcall(function() Pold.RE:FireServer("Claim") end) end
-    CharacterRE:FireServer("Del", oldUid)
+    if Pold and Pold.RE then 
+        pcall(function() Pold.RE:FireServer("Claim",(bit32.bxor(PlayerUserID, _s , Time_Value))) end) end
+    CharacterRE:FireServer("Del", oldUid,(bit32.bxor(PlayerUserID, _s , Time_Value)))
     task.wait(1.2) -- รอให้เซิร์ฟเวอร์ประมวลผลการลบ
 
     -- วางตัวใหม่
