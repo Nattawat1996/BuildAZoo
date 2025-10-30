@@ -1,7 +1,7 @@
 -- decrypted from locker
 
  --==============================================================
---                      INITIALIZATION V2.4.1 Fix bigpet smartpet
+--                      INITIALIZATION V2.4.3 Fix auto collect
 --==============================================================
 
 --== Game/Guard Checks
@@ -30,7 +30,7 @@ local Player = Players.LocalPlayer
 local PlayerUserID = Player.UserId
 local GameName = (MarketplaceService:GetProductInfo(game.PlaceId)["Name"]) or "None"
 local RunningEnvirontments = true
-
+local Time = ReplicatedStorage:FindFirstChild("Time")
 --== Game Data Paths
 local Data = Player:WaitForChild("PlayerGui", 60):WaitForChild("Data", 60)
 local ServerTime = ReplicatedStorage:WaitForChild("Time")
@@ -1287,11 +1287,13 @@ end
 --==============================================================
 local function collectAllOnce()
     local n = 0
-    for _, pet in pairs(OwnedPets) do
-        if pet and pet.RE then
-            pcall(function() pet.RE:FireServer("Claim") end)
+    for _, pet in pairs(Pet_Folder:GetChildren()) do
+        if pet:GetAttribute("UserId") == PlayerUserID then
+            local _s = Time:GetAttribute("s")
+            local _Value = Time.Value
+            pcall(function() pet.RE:FireServer("Claim", (bit32.bxor(PlayerUserID, _s , _Value))) end)
             n += 1
-            task.wait(0.05) 
+            task.wait(0.01) 
         end
     end
     pcall(function()
@@ -1301,11 +1303,13 @@ end
 
 local function runAutoCollect(tok)
     while tok.alive do
-        for _, pet in pairs(OwnedPets) do
+        for _, pet in pairs(Pet_Folder:GetChildren()) do
             if not tok.alive then break end
-            if pet and pet.RE then
-                pcall(function() pet.RE:FireServer("Claim") end)
-                task.wait(0.5)
+            if pet:GetAttribute("UserId") == PlayerUserID then
+                local _s = Time:GetAttribute("s")
+                local _Value = Time.Value
+                pcall(function() pet.RE:FireServer("Claim",(bit32.bxor(PlayerUserID, _s , _Value))) end)
+                task.wait(0.01)
             else
                 task.wait()
             end
@@ -1673,24 +1677,31 @@ local function runAutoCollectPet(tok)
     while tok.alive do
         local CollectMode = Configuration.Pet.Filters.CollectMode or "All"
         local function claimDel(UID, PetData)
-            if PetData.RE then pcall(function() PetData.RE:FireServer("Claim") end) end
-            pcall(function() CharacterRE:FireServer("Del", UID) end)
+            local _s = Time:GetAttribute("s")
+            local _Value = Time.Value
+            if PetData.RE then pcall(function() PetData.RE:FireServer("Claim",bit32.bxor(PlayerUserID, _s, _Value)) end) end
+            pcall(function() CharacterRE:FireServer("Del", UID,bit32.bxor(PlayerUserID, _s, _Value)) end)
         end
 
-        for UID, PetData in pairs(OwnedPets) do
-            if not tok.alive then break end
-            if not (PetData and not PetData.IsBig and passArea(UID)) then continue end
-            
+    for UID, PetData in pairs(OwnedPets) do
+        if not tok.alive then break end
+
+        local model   = Pet_Folder:FindFirstChild(UID)
+        local ownerId = model and tonumber(model:GetAttribute("UserId"))
+        local me      = tonumber(PlayerUserID) or (LocalPlayer and tonumber(LocalPlayer.UserId))
+
+        -- ทำงานต่อเมื่อ: มีโมเดล, เจ้าของตรงกับเรา, มี PetData, ไม่ใช่ Big, และอยู่โซนที่เลือก
+        if model and ownerId and me and ownerId == me
+        and PetData and not PetData.IsBig and passArea(UID) then
+
             local shouldCollect = false
             if CollectMode == "All" then
                 shouldCollect = true
             elseif CollectMode == "Match" then
                 local petType = PetData.Type
                 local petMuta = PetData.Mutate or "None"
-                
                 local passTypeCheck = not next(Configuration.Pet.Filters.Types) or Configuration.Pet.Filters.Types[petType]
                 local passMutaCheck = not next(Configuration.Pet.Filters.Mutations) or Configuration.Pet.Filters.Mutations[petMuta]
-
                 if passTypeCheck and passMutaCheck then
                     shouldCollect = true
                 end
@@ -1699,13 +1710,14 @@ local function runAutoCollectPet(tok)
                 local ps = tonumber(PetData.ProduceSpeed) or 0
                 shouldCollect = (ps <= threshold)
             end
-            
+
             if shouldCollect then
                 claimDel(UID, PetData)
-                task.wait(0.2)
+                task.wait(0.01)
             end
         end
-        
+    end
+   
         local delay = tonumber(Configuration.Pet.CollectPet_Delay) or 5
         if not _waitAlive(tok, delay) then break end
     end
@@ -2198,10 +2210,10 @@ local function runGifting(tok, giftList)
         giftSummaryParagraph:SetDesc(itemDisplayName) -- [MODIFIED] Use the new formatted name
 
         -- Send the item
-        CharacterRE:FireServer("Focus", uid); task.wait(0.75)
-        GiftRE:FireServer(targetPlayer); task.wait(0.75)
+        CharacterRE:FireServer("Focus", uid); task.wait(0.6)
+        GiftRE:FireServer(targetPlayer); task.wait(0.3)
         CharacterRE:FireServer("Focus")
-        task.wait(0.5)
+        task.wait(0.6)
         sent = sent + 1
     end
     
