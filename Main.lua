@@ -1,4 +1,8 @@
---==============================================================
+-- decrypted from locker
+
+ -- decrypted from locker
+
+ --==============================================================
 --                      INITIALIZATION V2.4.3 Fix auto collect
 --==============================================================
 
@@ -23,8 +27,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local VirtualUser = game:GetService("VirtualUser")
 local HttpService = game:GetService("HttpService")
-local _Shared = require(ReplicatedStorage:WaitForChild("Shared"))
-local Pet_Module = _Shared("Pet")
 --== Player & Game Globals
 local Player = Players.LocalPlayer
 local PlayerUserID = Player.UserId
@@ -50,14 +52,12 @@ local Island = workspace:WaitForChild("Art"):WaitForChild(IslandName)
 local Egg_Belt_Folder = ReplicatedStorage:WaitForChild("Eggs"):WaitForChild(IslandName)
 
 --== Remote Events
-local RE = {
-  Pet        = GameRemoteEvents:WaitForChild("PetRE", 30),
-  Character  = GameRemoteEvents:WaitForChild("CharacterRE", 30),
-  Conveyor   = GameRemoteEvents:WaitForChild("ConveyorRE"),
-  FoodStore  = GameRemoteEvents:WaitForChild("FoodStoreRE"),
-  Lottery    = GameRemoteEvents:WaitForChild("LotteryRE"),
-  Gift       = GameRemoteEvents:WaitForChild("GiftRE"),
-}
+local PetRE = GameRemoteEvents:WaitForChild("PetRE", 30)
+local CharacterRE = GameRemoteEvents:WaitForChild("CharacterRE", 30)
+local ConveyorRE = GameRemoteEvents:WaitForChild("ConveyorRE")
+local FoodStoreRE = GameRemoteEvents:WaitForChild("FoodStoreRE")
+local LotteryRE = GameRemoteEvents:WaitForChild("LotteryRE")
+local GiftRE = GameRemoteEvents:WaitForChild("GiftRE")
 
 --==============================================================
 --                      GAME DATA TABLES
@@ -321,69 +321,105 @@ local function TeleportToPlayer(targetPlayer)
     return true, "Success"
 end
 
-local function _getPetModule()
-    local ok, mod = pcall(function() return Shared("Pet") end)
-    if ok and mod then return mod end
-    return nil
-end
-
--- คำนวณรายได้จาก node ใน Data.Pets โดยตรง
-local function _computeInventoryIncome(petNode)
-    local petMod = _getPetModule()
-    if not (petMod and petNode) then return 0 end
-
-    local data = {
-        ["T"] = petNode:GetAttribute("T"),
-        ["M"] = petNode:GetAttribute("M"),
-        ["V"] = petNode:GetAttribute("V"),
-    }
-    if not data.T then return 0 end
-
-    local ok, val = pcall(function()
-        return petMod.GetPetProduce(nil, data, 1)
-    end)
-    return (ok and tonumber(val)) or 0
-end
 --==============================================================
 --                    INCOME CACHE & HELPERS
 --==============================================================
-local IncomeCache = { map = {}, last = 0 }
 
-local function _readPetConfig(uid)
-    if not uid or uid == "" then return nil end
-    if not OwnedPetData then return nil end
-    local node = OwnedPetData:FindFirstChild(uid)
-    if not node then return nil end
-    return {
-        T = node:GetAttribute("T"),
-        M = node:GetAttribute("M"),
-        V = node:GetAttribute("V"),
-    }
+local IncomeCache = { map = {}, built = false, last = 0 }
+
+local function _buildIncomeIndex()
+    local pg = Player:FindFirstChild("PlayerGui")
+    if not pg then return end
+    local s = pg:FindFirstChild("ScreenStorage")
+    if not s then return end
+    local f = s:FindFirstChild("Frame")
+    if not f then return end
+    local cp = f:FindFirstChild("ContentPet")
+    if not cp then return end
+    local sc = cp:FindFirstChild("ScrollingFrame")
+    if not sc then return end
+    
+    IncomeCache.map = {}
+    for _, item in ipairs(sc:GetChildren()) do
+        local uid = item.Name
+        local btn = item:FindFirstChild("BTN") or item:FindFirstChildWhichIsA("Frame")
+        local stat = btn and (btn:FindFirstChild("Stat") or btn:FindFirstChildWhichIsA("Frame"))
+        local price = stat and (stat:FindFirstChild("Price") or stat:FindFirstChildWhichIsA("Frame"))
+        local valueObj = price and price:FindFirstChild("Value")
+        local val
+        
+        if valueObj then
+            if valueObj:IsA("NumberValue") or valueObj:IsA("IntValue") then
+                val = tonumber(valueObj.Value)
+            elseif valueObj:IsA("StringValue") then
+                val = tonumber((tostring(valueObj.Value or ""):gsub("[^%d%.]", "")))
+            end
+        end
+        
+        if not val and price then
+            local function readText(inst)
+                local ok, txt = pcall(function() return inst.Text end)
+                if ok and txt then return tonumber((tostring(txt):gsub("[^%d%.]", ""))) end
+            end
+            val = readText(price) or (price:FindFirstChildWhichIsA("TextLabel") and readText(price:FindFirstChildWhichIsA("TextLabel")))
+            if not val then
+                for _, d in ipairs(price:GetDescendants()) do
+                    if d:IsA("TextLabel") or d:IsA("TextButton") then val = readText(d); if val then break end end
+                end
+            end
+        end
+        IncomeCache.map[uid] = tonumber(val or 0) or 0
+    end
+    IncomeCache.last = os.clock()
+    IncomeCache.built = true
 end
 
-local function _computeIncomeFromConfig(cfg)
-    -- ป้องกัน nil ทุกกรณี
-    if not (cfg and Pet_Module and type(Pet_Module.GetPetProduce) == "function") then
-        return 0
+function GetInventoryIncomePerSecByUID(uid)
+    if not uid or uid == "" then return 0 end
+    local pg = Player:FindFirstChild("PlayerGui"); if not pg then return 0 end
+    local screenStorage = pg:FindFirstChild("ScreenStorage"); if not screenStorage then return 0 end
+    local frame = screenStorage:FindFirstChild("Frame"); if not frame then return 0 end
+    local contentPet = frame:FindFirstChild("ContentPet"); if not contentPet then return 0 end
+    local scrolling = contentPet:FindFirstChild("ScrollingFrame"); if not scrolling then return 0 end
+    local item = scrolling:FindFirstChild(uid)
+    if not item then
+        for _, ch in ipairs(scrolling:GetChildren()) do if ch.Name == uid then item = ch break end end
     end
-    local ok, val = pcall(function()
-        -- อ้างอิงวิธีใหม่เหมือนตัวอย่าง: GetPetProduce(nil, Data, 1)
-        return tonumber(Pet_Module.GetPetProduce(nil, { T = cfg.T, M = cfg.M, V = cfg.V }, 1)) or 0
-    end)
-    return ok and val or 0
+    if not item then return 0 end
+    local btn = item:FindFirstChild("BTN") or item:FindFirstChildWhichIsA("Frame")
+    if not btn then return 0 end
+    local stat = btn:FindFirstChild("Stat") or btn:FindFirstChildWhichIsA("Frame")
+    if not stat then return 0 end
+    local price = stat:FindFirstChild("Price") or stat:FindFirstChildWhichIsA("Frame")
+    if not price then return 0 end
+    local valueObj = price:FindFirstChild("Value")
+    if valueObj then
+        if valueObj:IsA("NumberValue") or valueObj:IsA("IntValue") then return tonumber(valueObj.Value) or 0
+        elseif valueObj:IsA("StringValue") then return tonumber((tostring(valueObj.Value or ""):gsub("[^%d%.]", ""))) or 0 end
+    end
+    local function readText(inst)
+        local ok, txt = pcall(function() return inst.Text end)
+        if ok and txt then return tonumber((tostring(txt):gsub("[^%d%.]", ""))) end
+    end
+    local n = readText(price); if n then return n end
+    local textLike = price:FindFirstChildWhichIsA("TextLabel") or price:FindFirstChildWhichIsA("TextButton")
+    if textLike then n = readText(textLike); if n then return n end end
+    for _, d in ipairs(price:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then n = readText(d); if n then return n end end
+    end
+    return 0
 end
 
 local function GetIncomeFast(uid)
-    -- cache 5 วินาทีต่อชุดก็พอ (จะเร็วและลดแรงเขียนตาราง)
-    local now = os.clock()
-    if IncomeCache.map[uid] ~= nil and (now - IncomeCache.last) <= 5 then
-        return IncomeCache.map[uid]
+    if not IncomeCache.built or (os.clock() - IncomeCache.last > 5) then
+        pcall(_buildIncomeIndex)
     end
-    local cfg = _readPetConfig(uid)
-    local ps = _computeIncomeFromConfig(cfg)
-    IncomeCache.map[uid] = ps
-    IncomeCache.last = now
-    return ps
+    local v = IncomeCache.map[uid]
+    if v == nil then
+        v = GetInventoryIncomePerSecByUID(uid)
+        IncomeCache.map[uid] = v or 0
+    end
+    return v or 0
 end
 
 local function SortPetUidsByIncome(petUidList)
@@ -462,30 +498,30 @@ end
 
 local function SellEgg(uid)
     if not uid or uid == "" then return false, "no uid" end
-    RE.Character:FireServer("Focus", uid) task.wait(0.1)
-    local ok, err = pcall(function() RE.Pet:FireServer("Sell", uid, true) end)
-    RE.Character:FireServer("Focus")
+    CharacterRE:FireServer("Focus", uid) task.wait(0.1)
+    local ok, err = pcall(function() PetRE:FireServer("Sell", uid, true) end)
+    CharacterRE:FireServer("Focus")
     return ok, err
 end
 
 local function SellPet(uid)
     if not uid or uid == "" then return false, "no uid" end
-    RE.Character:FireServer("Focus", uid) task.wait(0.1)
-    local ok, err = pcall(function() RE.Pet:FireServer("Sell", uid) end)
-    RE.Character:FireServer("Focus")
+    CharacterRE:FireServer("Focus", uid) task.wait(0.1)
+    local ok, err = pcall(function() PetRE:FireServer("Sell", uid) end)
+    CharacterRE:FireServer("Focus")
     return ok, err
 end
 
 local function fireConveyorUpgrade(index)
     return pcall(function()
-        RE.Conveyor:FireServer("Upgrade", tonumber(index) or index)
+        ConveyorRE:FireServer("Upgrade", tonumber(index) or index)
     end)
 end
 
 local function fireUnlockTile(lockInfo)
     if not (lockInfo and lockInfo.farmPart) then return false end
     return pcall(function()
-        RE.Character:FireServer("Unlock", lockInfo.farmPart)
+        CharacterRE:FireServer("Unlock", lockInfo.farmPart)
     end)
 end
 
@@ -494,11 +530,11 @@ local function feedFruitToPet(fruitName, petUID)
     local petCfg = OwnedPetData:FindFirstChild(petUID)
     if petCfg and (not petCfg:GetAttribute("Feed")) then
         dprint(("[SmartFeed] Feeding '%s' to Pet UID: %s"):format(fruitName, petUID))
-        RE.Character:FireServer("Focus", fruitName) 
+        CharacterRE:FireServer("Focus", fruitName) 
         task.wait(0.3)
-        RE.Pet:FireServer("Feed", petUID) 
+        PetRE:FireServer("Feed", petUID) 
         task.wait(0.3)
-        RE.Character:FireServer("Focus")
+        CharacterRE:FireServer("Focus")
         return true
     else
         dprint("[SmartFeed] Pet is on cooldown, skipping feed.")
@@ -1378,7 +1414,7 @@ local function runAutoBuyFood(tok)
         for foodName, stockAmount in pairs(FoodListData:GetAttributes()) do
             if not tok.alive then break end
             if stockAmount > 0 and Configuration.Shop.Food.Foods[foodName] then
-                pcall(function() RE.FoodStore:FireServer(foodName) end)
+                pcall(function() FoodStoreRE:FireServer(foodName) end)
                 task.wait(0.12 + math.random() * 0.12)
             end
         end
@@ -1422,9 +1458,9 @@ local function runAutoFeed(tok)
                 if petCfg and (not petCfg:GetAttribute("Feed")) then
                     local Food = pickFoodPerPet(slot, Data_Inventory)
                     if Food and Food ~= "" then
-                        RE.Character:FireServer("Focus", Food) task.wait(0.3)
-                        RE.Pet:FireServer("Feed", uid) task.wait(0.3)
-                        RE.Character:FireServer("Focus")
+                        CharacterRE:FireServer("Focus", Food) task.wait(0.3)
+                        PetRE:FireServer("Feed", uid) task.wait(0.3)
+                        CharacterRE:FireServer("Focus")
                         Data_Inventory[Food] = math.max(0, (tonumber(Data_Inventory[Food] or 0) or 0) - 1)
                     end
                 end
@@ -1627,7 +1663,7 @@ local function runAutoCollectPet(tok)
             local _s = Time:GetAttribute("s")
             local Time_Value = Time.Value
             if PetData.RE then pcall(function() PetData.RE:FireServer("Claim",bit32.bxor(PlayerUserID, _s, Time_Value)) end) end
-            pcall(function() RE.Character:FireServer("Del", UID,bit32.bxor(PlayerUserID, _s, Time_Value)) end)
+            pcall(function() CharacterRE:FireServer("Del", UID,bit32.bxor(PlayerUserID, _s, Time_Value)) end)
         end
 
     for UID, PetData in pairs(OwnedPets) do
@@ -1771,7 +1807,7 @@ end
             local CharacterRE = GameRemoteEvents:WaitForChild("CharacterRE", 5)
             if CharacterRE then
                 dprint("[AutoFishing] กำลังส่งคำสั่ง Focus เริ่มต้น...")
-                pcall(function() RE.Character:FireServer("Focus", "FishRob") end)
+                pcall(function() CharacterRE:FireServer("Focus", "FishRob") end)
             end
             fishingState.didFocus = true
         end
@@ -1802,7 +1838,7 @@ end
             break
         end
         local selectedBait = Configuration.Fishing.Bait
-        RE.Character:FireServer("Focus", "FishRob")
+        CharacterRE:FireServer("Focus", "FishRob")
         FishingRE:FireServer("Start")
         FishingRE:FireServer("Throw", { NoMove = true, Bait = selectedBait, Pos = fishingState.lockedPos })
         FishingRE:FireServer("POUT",  { NoMove = true, SUC  = 1 })
@@ -1846,7 +1882,7 @@ local function runAutoBuyEgg(tok)
                 local okType = Configuration.Egg.Filters.Types[egg.Type]
                 local okMut  = Configuration.Egg.Filters.Mutations[egg.Mutate]
                 if okType and okMut then
-                    pcall(function() RE.Character:FireServer("BuyEgg", egg.UID) end)
+                    pcall(function() CharacterRE:FireServer("BuyEgg", egg.UID) end)
                     task.wait(0.15 + math.random() * 0.15)
                 end
             end
@@ -1903,7 +1939,7 @@ local function runAutoLike(tok)
         local targetId = _pickOtherUserId()
         if targetId then
             pcall(function()
-                RE.Character:FireServer("GiveLike", targetId)
+                CharacterRE:FireServer("GiveLike", targetId)
             end)
             likedUserIds[targetId] = true
             task.wait(1.0)
@@ -1950,7 +1986,7 @@ local function runAutoLottery(tok)
             -- แล้วตรวจสอบว่ามีตั๋วมากกว่า 0 ใบหรือไม่
             if (tonumber(ticketCount) or 0) > 0 then
                 dprint(("[AutoLottery] พบตั๋ว %d ใบในกระเป๋า, กำลังใช้งาน..."):format(ticketCount))
-                RE.Lottery:FireServer({ event = "lottery", count = 1 })
+                LotteryRE:FireServer({ event = "lottery", count = 1 })
             else
                 dprint("[AutoLottery] ไม่พบตั๋วในกระเป๋า, กำลังรอ...")
             end
@@ -2107,7 +2143,6 @@ end
 
 local function runGifting(tok, giftList)
     local targetPlayer = Players:FindFirstChild(Configuration.Players.SelectPlayer)
-    
     if not targetPlayer then 
         resetGiftUIState(); return 
     end
@@ -2158,9 +2193,9 @@ local function runGifting(tok, giftList)
         giftSummaryParagraph:SetDesc(itemDisplayName) -- [MODIFIED] Use the new formatted name
 
         -- Send the item
-        RE.Character:FireServer("Focus", uid); task.wait(0.6)
-        RE.GiftRE:FireServer(targetPlayer); task.wait(0.3)
-        RE.Character:FireServer("Focus")
+        CharacterRE:FireServer("Focus", uid); task.wait(0.6)
+        GiftRE:FireServer(targetPlayer); task.wait(0.3)
+        CharacterRE:FireServer("Focus")
         task.wait(0.6)
         sent = sent + 1
     end
@@ -2282,11 +2317,11 @@ local function __getFilteredInventoryEggUids()
 end
 
 local function __placeOneEggToPos(uid, worldPos)
-    RE.Character:FireServer("Focus", uid)      task.wait(0.25)
-    RE.Character:FireServer("Place", { DST = worldPos, ID = uid })
+    CharacterRE:FireServer("Focus", uid)      task.wait(0.25)
+    CharacterRE:FireServer("Place", { DST = worldPos, ID = uid })
     local ok = _waitForEggPlacementData(uid, 6) -- ใช้ตัวตรวจสอบเดิมของสคริปต์
     task.wait(0.2)
-    RE.Character:FireServer("Focus")
+    CharacterRE:FireServer("Focus")
     return ok
 end
 
@@ -2442,11 +2477,11 @@ end
 --== Helper: Execute the remote events to place one pet
 local function __placeOnePetToPos(uid, worldPos)
     task.wait(0.2)
-    RE.Character:FireServer("Focus", uid)
+    CharacterRE:FireServer("Focus", uid)
     task.wait(0.25)
-    RE.Character:FireServer("Place", { DST = worldPos, ID = uid })
+    CharacterRE:FireServer("Place", { DST = worldPos, ID = uid })
     task.wait(1)
-    RE.Character:FireServer("Focus")
+    CharacterRE:FireServer("Focus")
     return Pet_Folder:WaitForChild(uid, 3) ~= nil
 end
 
@@ -2488,19 +2523,19 @@ local function __replacePetAtTile(oldUid, newUid, tilePart)
     -- สั่งเก็บเงินและลบตัวเก่า
     if Pold and Pold.RE then 
         pcall(function() Pold.RE:FireServer("Claim",(bit32.bxor(PlayerUserID, _s , Time_Value))) end) end
-    RE.Character:FireServer("Del", oldUid,(bit32.bxor(PlayerUserID, _s , Time_Value)))
+    CharacterRE:FireServer("Del", oldUid,(bit32.bxor(PlayerUserID, _s , Time_Value)))
     task.wait(1.2) -- รอให้เซิร์ฟเวอร์ประมวลผลการลบ
 
     -- วางตัวใหม่
-    RE.Character:FireServer("Focus", newUid); task.wait(0.5)
-    RE.Character:FireServer("Place", { DST = destination, ID = newUid })
+    CharacterRE:FireServer("Focus", newUid); task.wait(0.5)
+    CharacterRE:FireServer("Place", { DST = destination, ID = newUid })
     
     -- << [ส่วนสำคัญ] >>
     -- รอการยืนยันว่าวางตัวใหม่สำเร็จจริงๆ โดยใช้ฟังก์ชันที่เราเพิ่งสร้าง
     local success = _waitForPetPlacementData(newUid, 5)
 
     task.wait(0.2)
-    RE.Character:FireServer("Focus")
+    CharacterRE:FireServer("Focus")
 
     if success then
         dprint(("[SmartPet] Successfully replaced %s with %s"):format(oldUid, newUid))
