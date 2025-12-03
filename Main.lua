@@ -2749,7 +2749,7 @@ Tabs.Main:AddSection("🎣 Fishing")
 
 Tabs.Main:AddDropdown("BaitSelection", {
     Title = "Select Bait",
-    Values = {"FishingBait1", "FishingBait2", "FishingBait3"},
+    Values = {"FishingBait1", "FishingBait2", "FishingBait3", "FishingBait4"},
     Default = Configuration.Fishing.Bait,
     Callback = function(v)
         Configuration.Fishing.Bait = v
